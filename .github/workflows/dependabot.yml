@@ -1,0 +1,65 @@
+---
+name: Dependabot Auto-Merge
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  dependabot:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    steps:
+      - name: Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+
+      # Patch updates: auto-merge across all ecosystems (lowest risk)
+      - name: Auto-merge patch updates
+        if: steps.metadata.outputs.update-type == 'version-update:semver-patch'
+        run: gh pr merge --auto --squash --delete-branch "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Minor updates: auto-merge for GitHub Actions and Terraform providers (well-versioned ecosystems)
+      - name: Auto-merge minor updates for GitHub Actions and Terraform
+        if: |
+          steps.metadata.outputs.update-type == 'version-update:semver-minor' &&
+          (
+            steps.metadata.outputs.package-ecosystem == 'github_actions' ||
+            steps.metadata.outputs.package-ecosystem == 'terraform'
+          )
+        run: gh pr merge --auto --squash --delete-branch "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Major updates: add a label for manual review instead of blocking
+      - name: Label major updates for manual review
+        if: steps.metadata.outputs.update-type == 'version-update:semver-major'
+        run: gh pr edit "$PR_URL" --add-label "major-update"
+        continue-on-error: true  # label may not exist in every repo; don't fail the job
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Error handler: comment on the PR if any merge step failed
+      - name: Comment on merge failure
+        if: failure()
+        run: |
+          gh pr comment "$PR_URL" --body \
+            "⚠️ **Dependabot auto-merge failed** for this PR. Please review and merge manually. Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
