@@ -1,0 +1,31 @@
+# Trivy ignore list
+#
+# This repo vendors third-party code under `.terraform/` during `terraform init`.
+# Trivy's `config` scan currently includes those vendored module examples (not
+# maintained here), which triggers Dockerfile misconfiguration findings.
+#
+# Where possible, we keep ignores narrow and link to the upstream rule.
+
+# Vendored module example Dockerfiles often run as root (not our Dockerfiles).
+# See https://avd.aquasec.com/misconfig/ds-0002
+DS-0002
+
+# Vendored module example Dockerfiles use floating base image tags.
+# See https://avd.aquasec.com/misconfig/ds-0001
+DS-0001
+
+# Vendored module example Dockerfiles use RUN 'cd ...' patterns.
+# See https://avd.aquasec.com/misconfig/ds-0013
+DS-0013
+
+# Vendored module example Dockerfiles omit yum cache cleanup.
+# See https://avd.aquasec.com/misconfig/ds-0015
+DS-0015
+
+# Vendored module example Dockerfiles omit HEALTHCHECK.
+# See https://avd.aquasec.com/misconfig/ds-0026
+DS-0026
+
+# Vendored module example Lambda definitions may not enable X-Ray tracing.
+# See https://avd.aquasec.com/misconfig/aws-0066
+AWS-0066
