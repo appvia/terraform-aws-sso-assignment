@@ -17,28 +17,5 @@ permissions:
 
 jobs:
   validate-workflows:
+    uses: appvia/appvia-cicd-workflows/.github/workflows/github-workflow-validation.yml@main
     name: Validate GitHub Workflows
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Validate GitHub Workflows
-        run: |
-          echo "Validating GitHub workflow files..."
-          find .github/workflows -name "*.yml" -o -name "*.yaml" | while read -r file; do
-            echo "Validating $file"
-            # Basic YAML validation
-            python3 -c "import yaml; yaml.safe_load(open('$file'))" || exit 1
-          done
-          echo "✓ All GitHub workflow files are valid"
-      - name: Install Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: 1.26.x
-          cache: true
-      - name: Install Actionlint
-        run: go install github.com/rhysd/actionlint/cmd/actionlint@latest
-      - name: Run Actionlint
-        id: actionlint
-        run: actionlint .github/workflows/*.yml
