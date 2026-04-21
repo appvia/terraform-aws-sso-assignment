@@ -265,6 +265,8 @@ See [LICENSE](./LICENSE).
 
 | Name | Description |
 |------|-------------|
+| <a name="output_assignments_tracking_table_arn"></a> [assignments\_tracking\_table\_arn](#output\_assignments\_tracking\_table\_arn) | ARN of the DynamoDB table tracking managed SSO assignments |
+| <a name="output_assignments_tracking_table_name"></a> [assignments\_tracking\_table\_name](#output\_assignments\_tracking\_table\_name) | Name of the DynamoDB table tracking managed SSO assignments |
 | <a name="output_dynamodb_table_arn"></a> [dynamodb\_table\_arn](#output\_dynamodb\_table\_arn) | ARN of the DynamoDB table storing group configurations |
 | <a name="output_dynamodb_table_name"></a> [dynamodb\_table\_name](#output\_dynamodb\_table\_name) | Name of the DynamoDB table storing group configurations |
 | <a name="output_eventbridge_rule_arns"></a> [eventbridge\_rule\_arns](#output\_eventbridge\_rule\_arns) | ARNs of EventBridge rules for account creation and cron schedule |

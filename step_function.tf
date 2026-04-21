@@ -1,88 +1,97 @@
 locals {
+  ## Base states for the Step Function state machine
+  base_states = {
+    DetermineExecutionMode = {
+      Type = "Choice"
+      Choices = [
+        {
+          Variable     = "$.source"
+          StringEquals = "eventbridge.account_creation"
+          Next         = "InvokeLambdaSingleAccount"
+        }
+      ]
+      Default = "InvokeLambdaAllAccounts"
+    }
+
+    InvokeLambdaSingleAccount = {
+      Type     = "Task"
+      Resource = module.lambda.lambda_function_arn
+      Parameters = {
+        "account_id.$" = "$.detail.account_id"
+        "source"       = "account_creation"
+      }
+      Next = "EvaluateResponse"
+      Retry = [
+        {
+          ErrorEquals     = ["States.ALL"]
+          IntervalSeconds = 2
+          MaxAttempts     = 3
+          BackoffRate     = 2.0
+        }
+      ]
+    }
+
+    InvokeLambdaAllAccounts = {
+      Type     = "Task"
+      Resource = module.lambda.lambda_function_arn
+      Parameters = {
+        "source" = "cron_schedule"
+      }
+      Next = "EvaluateResponse"
+      Retry = [
+        {
+          ErrorEquals     = ["States.ALL"]
+          IntervalSeconds = 2
+          MaxAttempts     = 3
+          BackoffRate     = 2.0
+        }
+      ]
+    }
+
+    EvaluateResponse = {
+      Type = "Choice"
+      Choices = [
+        {
+          Variable = "$.errors"
+          IsNull   = false
+          Next     = var.sns_topic_arn != null ? "SendNotification" : "Failure"
+        }
+      ]
+      Default = "Success"
+    }
+
+    Success = {
+      Type = "Succeed"
+    }
+
+    Failure = {
+      Type = "Fail"
+    }
+  }
+
+  ## Optional SendNotification state (only included if SNS topic is provided)
+  optional_states = var.sns_topic_arn != null ? {
+    SendNotification = {
+      Type     = "Task"
+      Resource = "arn:aws:states:::sns:publish"
+      Parameters = {
+        TopicArn = var.sns_topic_arn
+        Message = {
+          "error_details.$" = "$"
+        }
+      }
+      Next = "Failure"
+    }
+  } : {}
+
+  ## Merge all states
+  all_states = merge(local.base_states, local.optional_states)
+
   ## The definition of the Step Function state machine
   step_function_definition = jsonencode({
     Comment = "Used to orchestrate the SSO group assignment workflow"
     StartAt = "DetermineExecutionMode"
-    States = {
-      DetermineExecutionMode = {
-        Type = "Choice"
-        Choices = [
-          {
-            Variable     = "$.source"
-            StringEquals = "eventbridge.account_creation"
-            Next         = "InvokeLambdaSingleAccount"
-          }
-        ]
-        Default = "InvokeLambdaAllAccounts"
-      }
-
-      InvokeLambdaSingleAccount = {
-        Type     = "Task"
-        Resource = module.lambda.lambda_function_arn
-        Parameters = {
-          "account_id.$" = "$.detail.account_id"
-          "source"       = "account_creation"
-        }
-        Next = "EvaluateResponse"
-        Retry = [
-          {
-            ErrorEquals     = ["States.ALL"]
-            IntervalSeconds = 2
-            MaxAttempts     = 3
-            BackoffRate     = 2.0
-          }
-        ]
-      }
-
-      InvokeLambdaAllAccounts = {
-        Type     = "Task"
-        Resource = module.lambda.lambda_function_arn
-        Parameters = {
-          "source" = "cron_schedule"
-        }
-        Next = "EvaluateResponse"
-        Retry = [
-          {
-            ErrorEquals     = ["States.ALL"]
-            IntervalSeconds = 2
-            MaxAttempts     = 3
-            BackoffRate     = 2.0
-          }
-        ]
-      }
-
-      EvaluateResponse = {
-        Type = "Choice"
-        Choices = [
-          {
-            Variable = "$.errors"
-            IsNull   = false
-            Next     = var.sns_topic_arn != null ? "SendNotification" : "Failure"
-          }
-        ]
-        Default = "Success"
-      }
-
-      SendNotification = var.sns_topic_arn != null ? {
-        Type     = "Task"
-        Resource = "arn:aws:states:::sns:publish"
-        Parameters = {
-          TopicArn = var.sns_topic_arn
-          Message = {
-            "error_details.$" = "$"
-          }
-        }
-        Next = "Failure"
-      } : null
-
-      Success = {
-        Type = "Succeed"
-      }
-
-      Failure = {
-        Type = "Fail"
-      }
-    }
+    States  = local.all_states
   })
 }
 
@@ -95,6 +104,9 @@ data "aws_iam_policy_document" "step_function_assume_role" {
       type        = "Service"
       identifiers = ["states.amazonaws.com"]
     }
+    actions = [
+      "sts:AssumeRole"
+    ]
   }
 }
 

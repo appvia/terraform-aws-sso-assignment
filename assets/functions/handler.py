@@ -17,24 +17,20 @@ IAM Identity Center **group display names**. For each pair, the template named
 names**; those permission sets are assigned to each listed group for that account.
 """
 
-from math import log
-import tempfile
-from zoneinfo import available_timezones
-import boto3
 import json
 import logging
 import os
 import time
-from botocore.exceptions import ClientError
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple, TypedDict
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Optional, Tuple
+
+import boto3
+from botocore.exceptions import ClientError
 
 # Lambda sets AWS_REGION; unit tests and other import contexts may not — botocore requires a region.
 _AWS_REGION = (
-    os.environ.get("AWS_REGION")
-    or os.environ.get("AWS_DEFAULT_REGION")
-    or "us-east-1"
+    os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
 )
 
 # Initialize the DynamoDB client
@@ -51,6 +47,7 @@ logger = logging.getLogger(__name__)
 # Set the log level from the environment variable (set by Lambda) or default to INFO.
 logger.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
 
+
 @dataclass
 class Group:
     # The group name
@@ -60,6 +57,7 @@ class Group:
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), default=str)
+
 
 # A binding of a permission set to a group
 @dataclass
@@ -71,7 +69,9 @@ class Binding:
     # The permission set ARN
     permission_set_arn: str = field(default_factory=lambda: "")
     # The groups to assign the permission set to
-    groups: List[Group] = field(default_factory=lambda: [])
+    groups: list[Group] = field(default_factory=lambda: [])
+    # The name of the template this binding came from
+    template_name: str = field(default_factory=lambda: "")
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), default=str)
@@ -82,15 +82,16 @@ class Permission:
     # The permission set name
     name: str = field(default_factory=lambda: "")
     # The groups to assign the permission set to
-    groups: List[str] = field(default_factory=lambda: [])
+    groups: list[str] = field(default_factory=lambda: [])
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), default=str)
 
+
 @dataclass
 class GroupConfiguration:
     # The permission sets to assign to the group
-    permission_sets: List[str] = field(default_factory=lambda: [])
+    permission_sets: list[str] = field(default_factory=lambda: [])
     # The enabled flag
     enabled: bool = field(default_factory=lambda: True)
     # The description
@@ -103,7 +104,36 @@ class GroupConfiguration:
 @dataclass
 class Configuration:
     # The group configurations
-    groups: Dict[str, GroupConfiguration] = field(default_factory=lambda: {})
+    groups: dict[str, GroupConfiguration] = field(default_factory=lambda: {})
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), default=str)
+
+
+@dataclass
+class TrackedAssignment:
+    """Represents an assignment tracked in the assignments_tracking DynamoDB table."""
+
+    # Composite key: {account_id}#{principal_id}#{permission_set_arn}
+    assignment_id: str = field(default_factory=lambda: "")
+    # AWS account ID where assignment exists
+    account_id: str = field(default_factory=lambda: "")
+    # ARN of the permission set
+    permission_set_arn: str = field(default_factory=lambda: "")
+    # Name of the permission set (for logging)
+    permission_set_name: str = field(default_factory=lambda: "")
+    # Identity Center principal ID (group or user)
+    principal_id: str = field(default_factory=lambda: "")
+    # Type of principal: "GROUP" or "USER"
+    principal_type: str = field(default_factory=lambda: "")
+    # Name of the template this assignment came from
+    template_name: str = field(default_factory=lambda: "")
+    # Display name of the group (for logging)
+    group_name: str = field(default_factory=lambda: "")
+    # ISO 8601 timestamp when assignment was created
+    created_at: str = field(default_factory=lambda: "")
+    # ISO 8601 timestamp when assignment was last seen during reconciliation
+    last_seen: str = field(default_factory=lambda: "")
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), default=str)
@@ -136,7 +166,7 @@ class _JSONFormatter(logging.Formatter):
     }
 
     def format(self, record: logging.LogRecord) -> str:
-        log_entry: Dict[str, Any] = {
+        log_entry: dict[str, Any] = {
             "timestamp": self.formatTime(record, self.datefmt),
             "level": record.levelname,
             "logger": record.name,
@@ -153,10 +183,474 @@ class _JSONFormatter(logging.Formatter):
         return json.dumps(log_entry, default=str)
 
 
+# Configure the logger to emit JSON-formatted logs to stdout.
 _handler = logging.StreamHandler()
 _handler.setFormatter(_JSONFormatter())
 logger.handlers = [_handler]
 logger.propagate = False
+
+
+def record_tracking_assignment(
+    tracking_table_name: str,
+    assignment_id: str,
+    account_id: str,
+    permission_set_arn: str,
+    permission_set_name: str,
+    principal_id: str,
+    principal_type: str,
+    template_name: str,
+    group_name: str,
+) -> None:
+    """
+    Record a new assignment in the tracking table.
+
+    Args:
+        tracking_table_name: Name of the DynamoDB tracking table
+        assignment_id: Composite ID {account_id}#{principal_id}#{permission_set_arn}
+        account_id: AWS account ID
+        permission_set_arn: ARN of the permission set
+        permission_set_name: Name of the permission set
+        principal_id: Identity Center principal ID
+        principal_type: Type of principal ("GROUP" or "USER")
+        template_name: Name of the template this came from
+        group_name: Display name of the group
+    """
+
+    now = datetime.now(timezone.utc).isoformat()
+    tracked = TrackedAssignment(
+        assignment_id=assignment_id,
+        account_id=account_id,
+        permission_set_arn=permission_set_arn,
+        permission_set_name=permission_set_name,
+        principal_id=principal_id,
+        principal_type=principal_type,
+        template_name=template_name,
+        group_name=group_name,
+        created_at=now,
+        last_seen=now,
+    )
+
+    try:
+        table = dynamodb.Table(tracking_table_name)
+        table.put_item(Item=asdict(tracked))
+
+        logger.info(
+            "Recorded assignment in tracking table",
+            extra={
+                "action": "record_tracking_assignment",
+                "assignment_id": assignment_id,
+                "account_id": account_id,
+                "permission_set_name": permission_set_name,
+                "principal_id": principal_id,
+                "template_name": template_name,
+            },
+        )
+    except ClientError as e:
+        logger.error(
+            "Failed to record assignment in tracking table",
+            extra={
+                "action": "record_tracking_assignment",
+                "assignment_id": assignment_id,
+                "account_id": account_id,
+            },
+        )
+        raise HandlerError(f"Could not record assignment in tracking table: {e}") from e
+
+
+def delete_tracking_assignment(
+    account_id: str,
+    assignment_id: str,
+    permission_set_name: str,
+    tracking_table_name: str,
+) -> None:
+    """
+    Delete a tracking assignment from the tracking table.
+
+    Args:
+        assignment_id: Composite ID {account_id}#{principal_id}#{permission_set_arn}
+        account_id: AWS account ID
+        permission_set_name: Name of the permission set
+    """
+
+    logger.info(
+        "Deleting tracking assignment from tracking table",
+        extra={
+            "action": "delete_tracking_assignment",
+            "assignment_id": assignment_id,
+            "account_id": account_id,
+            "permission_set_name": permission_set_name,
+        },
+    )
+
+    try:
+        table = dynamodb.Table(tracking_table_name)
+        table.delete_item(Key={"assignment_id": assignment_id})
+    except ClientError as e:
+        logger.error(
+            "Failed to delete tracking assignment from tracking table",
+            extra={
+                "action": "delete_tracking_assignment",
+                "assignment_id": assignment_id,
+                "account_id": account_id,
+                "permission_set_name": permission_set_name,
+            },
+        )
+        raise HandlerError(
+            f"Could not delete tracking assignment from tracking table: {e}"
+        ) from e
+
+
+def get_tracking_assignments(
+    tracking_table_name: str,
+) -> list[TrackedAssignment]:
+    """
+    Returns all the tracking assignments from the tracking table.
+
+    Args:
+        tracking_table_name: Name of the DynamoDB tracking table
+
+    Returns:
+        List of tracking assignments
+    """
+
+    assignments: list[TrackedAssignment] = []
+    try:
+        logger.info(
+            "Getting tracking assignments from tracking table",
+            extra={
+                "action": "get_tracking_assignments",
+                "tracking_table_name": tracking_table_name,
+            },
+        )
+        table = dynamodb.Table(tracking_table_name)
+        resp = table.scan()
+
+        for item in resp.get("Items", []):
+            assignments.append(
+                TrackedAssignment(
+                    account_id=item.get("account_id", ""),
+                    assignment_id=item.get("assignment_id", ""),
+                    created_at=item.get("created_at", ""),
+                    group_name=item.get("group_name", ""),
+                    last_seen=item.get("last_seen", ""),
+                    permission_set_arn=item.get("permission_set_arn", ""),
+                    permission_set_name=item.get("permission_set_name", ""),
+                    principal_id=item.get("principal_id", ""),
+                    principal_type=item.get("principal_type", ""),
+                    template_name=item.get("template_name", ""),
+                )
+            )
+        logger.debug(
+            "Retrieved assignments",
+            extra={
+                "action": "get_tracking_assignments",
+                "count": len(assignments),
+            },
+        )
+
+        return assignments
+
+    except ClientError as e:
+        logger.error(
+            "Failed to get tracked assignments",
+            extra={
+                "action": "get_tracking_assignments",
+            },
+        )
+        raise HandlerError(f"Could not get assignments: {e}") from e
+
+
+def delete_permission(
+    instance_arn: str,
+    account_id: str,
+    permission_set_arn: str,
+    principal_id: str,
+    principal_type: str,
+    poll_timeout_seconds: int = 60,
+    poll_interval_seconds: float = 1.5,
+) -> None:
+    """
+    Delete a permission set assignment and wait for completion.
+
+    Args:
+        instance_arn: The ARN of the SSO Instance
+        account_id: The ID of the target account
+        permission_set_arn: The ARN of the permission set
+        principal_id: The ID of the principal
+        principal_type: The type of principal ("GROUP" or "USER")
+        poll_timeout_seconds: The timeout for the poll
+        poll_interval_seconds: The interval for the poll
+
+    Returns:
+        None
+    Raises:
+        HandlerError: If the account assignment deletion fails
+    """
+
+    logger.info(
+        "Deleting account assignment",
+        extra={
+            "action": "delete_permission",
+            "instance_arn": instance_arn,
+            "account_id": account_id,
+            "permission_set_arn": permission_set_arn,
+            "principal_id": principal_id,
+            "principal_type": principal_type,
+        },
+    )
+
+    # Initiate the deletion
+    resp = sso_admin.delete_account_assignment(
+        InstanceArn=instance_arn,
+        PermissionSetArn=permission_set_arn,
+        PrincipalId=principal_id,
+        PrincipalType=principal_type,
+        TargetId=account_id,
+        TargetType="AWS_ACCOUNT",
+    )
+    request_id = resp["AccountAssignmentDeletionStatus"]["RequestId"]
+
+    deadline = time.time() + poll_timeout_seconds
+
+    while True:
+        # Describe the account assignment deletion status
+        status = sso_admin.describe_account_assignment_deletion_status(
+            InstanceArn=instance_arn,
+            AccountAssignmentDeletionRequestId=request_id,
+        )["AccountAssignmentDeletionStatus"]
+
+        # Get the status of the account assignment deletion
+        state = status.get("Status")
+        # If the status is SUCCEEDED, return
+        if state == "SUCCEEDED":
+            logger.info(
+                "Successfully deleted permission set assignment",
+                extra={
+                    "action": "delete_permission",
+                    "account_id": account_id,
+                    "permission_set_arn": permission_set_arn,
+                    "principal_id": principal_id,
+                },
+            )
+            return
+        # If the status is FAILED, raise an error
+        if state == "FAILED":
+            # Get the failure reason
+            failure_reason = status.get("FailureReason", "unknown")
+            # Raise an error with the failure reason
+            raise HandlerError(
+                f"Assignment deletion failed (account={account_id}, "
+                f"permission_set_arn={permission_set_arn}, principal_id={principal_id}): {failure_reason}"
+            )
+
+        # If the time has expired, raise an error
+        if time.time() >= deadline:
+            # Raise an error with the request ID, account ID, permission set ARN, and principal ID
+            raise HandlerError(
+                f"Timed out waiting for assignment deletion (request_id={request_id}, "
+                f"account={account_id}, permission_set_arn={permission_set_arn}, principal_id={principal_id})"
+            )
+
+        # Sleep for the poll interval
+        time.sleep(poll_interval_seconds)
+
+
+def has_matching_binding(
+    assignment: TrackedAssignment,
+    bindings: list[Binding],
+) -> bool:
+    """
+    Check if the assignment has a matching binding.
+
+    Args:
+        assignment: The assignment to check
+        binding: The list of bindings to check against
+
+    Returns:
+        True if the assignment has a matching binding, False otherwise
+    """
+
+    # Iterate over the bindings and check if the assignment has a matching binding
+    for binding in bindings:
+        logger.debug(
+            "Checking if binding has a matching assignment",
+            extra={
+                "action": "has_matching_binding",
+                "assignment.account_id": assignment.account_id,
+                "assignment.group_name": assignment.group_name,
+                "assignment.permission_set_name": assignment.permission_set_name,
+                "binding.account_id": binding.account_id,
+                "binding.groups": binding.groups,
+                "binding.permission_set_name": binding.permission_set_name,
+            },
+        )
+        # Ensure the assignment is for the correct account
+        if assignment.account_id != binding.account_id:
+            continue
+        # Ensure the assignment is for the correct permission set
+        if assignment.permission_set_name != binding.permission_set_name:
+            continue
+        # Ensure the assignment is for a group that is in the binding
+        for group in binding.groups:
+            if assignment.principal_id == group.id:
+                logger.info(
+                    "Found matching binding",
+                    extra={
+                        "action": "has_matching_binding",
+                        "assignment.account_id": assignment.account_id,
+                        "assignment.permission_set_name": assignment.permission_set_name,
+                        "assignment.group_name": assignment.group_name,
+                    },
+                )
+                return True
+
+    return False
+
+
+def reconcile_assignments(
+    instance_arn: str,
+    desired_bindings: list[Binding],
+    tracking_table_name: Optional[str] = None,
+    accounts_to_reconcile: Optional[list[str]] = None,
+) -> Tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Reconcile provisioned assignments against the desired configuration.
+
+    For each account, compare what is currently provisioned in AWS IAM Identity Center
+    against what *should* exist based on the provided bindings. If an active assignment
+    exists in AWS but is not present in the desired bindings, delete it.
+
+    Args:
+        instance_arn: The ARN of the SSO Instance
+        desired_bindings: Full set of desired bindings (typically across all target accounts)
+        tracking_table_name: Optional name of DynamoDB tracking table for marking deletions
+        accounts_to_reconcile: Optional list of account IDs to reconcile.
+
+    Returns:
+        (deleted_assignments, deletion_failures) - lists of dictionaries documenting deletions
+    """
+
+    logger.info(
+        "Starting assignment reconciliation",
+        extra={
+            "action": "reconcile_assignments",
+            "instance_arn": instance_arn,
+            "desired_bindings_count": len(desired_bindings),
+            "tracking_table_name": tracking_table_name,
+            "accounts_to_reconcile": accounts_to_reconcile,
+        },
+    )
+
+    successful_deletions: list[dict[str, Any]] = []
+    failed_deletions: list[dict[str, Any]] = []
+
+    try:
+        # Retrieve all active assignments from the tracking table
+        assignments = get_tracking_assignments(tracking_table_name)
+
+        logger.info(
+            "Retrieved all tracking assignments from tracking table",
+            extra={
+                "action": "reconcile_assignments",
+                "assignments_count": len(assignments),
+            },
+        )
+        # If there are no assignments, we can return an empty list
+        if len(assignments) == 0:
+            logger.info(
+                "No tracking assignments to reconcile",
+                extra={
+                    "action": "reconcile_assignments",
+                },
+            )
+            return [], []
+
+        # For each of the assignments, we need to find a corresponding binding in t
+        # he desired_bindings list. If no matching binding is found, we need to delete
+        # the assignment.
+        for assignment in assignments:
+            if not has_matching_binding(assignment, desired_bindings):
+                logger.info(
+                    "Deleting tracking assignment, no matching binding found for account",
+                    extra={
+                        "action": "reconcile_assignments",
+                        "account_id": assignment.account_id,
+                        "assignment_id": assignment.assignment_id,
+                        "permission_set_name": assignment.permission_set_name,
+                    },
+                )
+                try:
+                    # Attempt to delete the assignment from the account
+                    delete_permission(
+                        instance_arn=instance_arn,
+                        account_id=assignment.account_id,
+                        permission_set_arn=assignment.permission_set_arn,
+                        principal_id=assignment.principal_id,
+                        principal_type=assignment.principal_type.upper(),
+                    )
+                    successful_deletions.append(
+                        {
+                            "assignment_id": assignment.assignment_id,
+                            "account_id": assignment.account_id,
+                            "permission_set_name": assignment.permission_set_name,
+                        }
+                    )
+                except Exception as e:
+                    # If the deletion failed because the assignment does not exist, we can ignore it
+                    if "Assignment does not exist" in str(e):
+                        logger.info(
+                            "Assignment does not exist, skipping",
+                            extra={
+                                "action": "reconcile_assignments",
+                            },
+                        )
+                    else:
+                        logger.error(
+                            "Error trying to delete assignment",
+                            extra={
+                                "action": "reconcile_assignments",
+                                "assignment_id": assignment.assignment_id,
+                                "account_id": assignment.account_id,
+                                "permission_set_name": assignment.permission_set_name,
+                                "error": str(e),
+                            },
+                        )
+                        failed_deletions.append(
+                            {
+                                "assignment_id": assignment.assignment_id,
+                                "account_id": assignment.account_id,
+                                "permission_set_name": assignment.permission_set_name,
+                                "error": str(e),
+                            }
+                        )
+
+                # We need to delete the assignment from the tracking table
+                delete_tracking_assignment(
+                    account_id=assignment.account_id,
+                    assignment_id=assignment.assignment_id,
+                    permission_set_name=assignment.permission_set_name,
+                    tracking_table_name=tracking_table_name,
+                )
+                logger.info(
+                    "Deleted tracking assignment",
+                    extra={
+                        "action": "reconcile_assignments",
+                        "failed_deletions_count": len(failed_deletions),
+                        "successful_deletions_count": len(successful_deletions),
+                    },
+                )
+
+            return successful_deletions, failed_deletions
+
+    except Exception as e:
+        logger.error(
+            "Unhandled error during tracking assignment reconciliation",
+            extra={
+                "action": "reconcile_assignments",
+                "error": str(e),
+            },
+        )
+        raise
 
 
 class HandlerError(RuntimeError):
@@ -184,7 +678,7 @@ def get_identity_store_id(instance_arn: str) -> str:
     raise HandlerError(f"SSO Instance ARN not found in list_instances: {instance_arn}")
 
 
-def get_permission_sets(instance_arn: str) -> Dict[str, str]:
+def get_permission_sets(instance_arn: str) -> dict[str, str]:
     """
     Get the permission sets in the SSO Instance.
 
@@ -203,7 +697,7 @@ def get_permission_sets(instance_arn: str) -> Dict[str, str]:
     )
 
     # Initialize the map to store the permission sets
-    permission_sets: Dict[str, str] = {}
+    permission_sets: dict[str, str] = {}
     # Create a paginator to list the permission sets
     paginator = sso_admin.get_paginator("list_permission_sets")
 
@@ -228,7 +722,7 @@ def get_permission_sets(instance_arn: str) -> Dict[str, str]:
     return permission_sets
 
 
-def get_identity_store_groups(identity_store_id: str) -> Dict[str, str]:
+def get_identity_store_groups(identity_store_id: str) -> dict[str, str]:
     """
     Get the groups in the Identity Store with their IDs and names.
 
@@ -248,7 +742,7 @@ def get_identity_store_groups(identity_store_id: str) -> Dict[str, str]:
     )
 
     # Initialize a map of group IDs to names
-    groups: Dict[str, str] = {}
+    groups: dict[str, str] = {}
     # Create a paginator to list the groups
     paginator = identitystore.get_paginator("list_groups")
 
@@ -273,25 +767,25 @@ def get_identity_store_groups(identity_store_id: str) -> Dict[str, str]:
     return groups
 
 
-def list_active_accounts() -> List[str]:
+def list_active_accounts() -> list[str]:
     """
     List all active accounts in the organization.
 
     Returns:
         A list of account IDs
     """
-    
+
     logger.info(
         "Listing active accounts",
         extra={
             "action": "list_active_accounts",
         },
     )
-    
+
     # Create a paginator to list all accounts
     paginator = organizations.get_paginator("list_accounts")
 
-    account_ids: List[str] = []
+    account_ids: list[str] = []
     for page in paginator.paginate():
         for acct in page.get("Accounts", []):
             if acct.get("Status") == "ACTIVE":
@@ -309,7 +803,7 @@ def list_active_accounts() -> List[str]:
     return account_ids
 
 
-def get_account_tags(account_id: str) -> Dict[str, str]:
+def get_account_tags(account_id: str) -> dict[str, str]:
     """
     Load AWS Organizations resource tags for the member account.
 
@@ -361,9 +855,9 @@ def ensure_account_exists(account_id: str) -> None:
 
 
 def get_account_permission_tags(
-    account_tags: Dict[str, str],
+    account_tags: dict[str, str],
     tag_prefix: str,
-) -> List[Permission]:
+) -> list[Permission]:
     """
     Build ``Permission`` entries from account tags whose keys are ``{prefix}/{template_name}``.
 
@@ -375,12 +869,12 @@ def get_account_permission_tags(
     """
 
     # Initialize the list to store the permission tags
-    tags: List[Permission] = []
+    tags: list[Permission] = []
 
     for key, value in account_tags.items():
         if key.startswith(tag_prefix):
             permission_tag: Permission = Permission(
-                name=key,
+                name=key.split("/")[1],
                 groups=[group.strip() for group in value.split(",") if group.strip()],
             )
             tags.append(permission_tag)
@@ -415,10 +909,10 @@ def load_configuration(table_name: str) -> Configuration:
     # Initialize the list to store the group configurations
     configuration: Configuration = Configuration()
     # Initialize the last evaluated key to None
-    last_evaluated_key: Optional[Dict[str, Any]] = None
+    last_evaluated_key: Optional[dict[str, Any]] = None
 
     while True:
-        kwargs: Dict[str, Any] = {}
+        kwargs: dict[str, Any] = {}
         if last_evaluated_key:
             kwargs["ExclusiveStartKey"] = last_evaluated_key
 
@@ -428,7 +922,8 @@ def load_configuration(table_name: str) -> Configuration:
             group_configuration: GroupConfiguration = GroupConfiguration(
                 permission_sets=item.get("permission_sets", []),
                 enabled=item.get("enabled", True),
-                description=item.get("description", ""))
+                description=item.get("description", ""),
+            )
             configuration.groups[item.get("group_name")] = group_configuration
 
         last_evaluated_key = resp.get("LastEvaluatedKey")
@@ -449,18 +944,18 @@ def load_configuration(table_name: str) -> Configuration:
 
 def get_bindings(
     account_id: str,
-    identity_store_groups: Dict[str, str],
-    permission_sets: Dict[str, str],
+    identity_store_groups: dict[str, str],
+    permission_sets: dict[str, str],
     request: Permission,
     template: GroupConfiguration,
-) -> Tuple[List[Binding], List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> Tuple[list[Binding], list[dict[str, Any]], list[dict[str, Any]]]:
     """
     Build a list of bindings for the given request.
 
     Args:
         account_id: The ID of the account
-        identity_store_groups: A Dict of all the available identity store groups
-        permission_sets: A Dict of all the available permission sets
+        identity_store_groups: A map of all the available identity store groups
+        permission_sets: A map of all the available permission sets
         request: The request to build the bindings for
         template: The group configuration template to use
     Returns:
@@ -468,11 +963,11 @@ def get_bindings(
     """
 
     # Initialize the list to store the bindings
-    bindings: List[Binding] = []
+    bindings: list[Binding] = []
     # Initialize the lists to store the successes and failures
-    successes: List[Dict[str, Any]] = []
+    successes: list[dict[str, Any]] = []
     # Initialize the list to store the failures
-    failures: List[Dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
 
     logger.info(
         "Building bindings for account",
@@ -483,7 +978,7 @@ def get_bindings(
         },
     )
 
-    available_groups: List[Group] = []
+    available_groups: list[Group] = []
 
     # Check all the groups exist in the identity store
     for group in request.groups:
@@ -545,6 +1040,7 @@ def get_bindings(
             permission_set_name=ps_name,
             permission_set_arn=permission_sets[ps_name],
             groups=available_groups,
+            template_name=request.name,
         )
         bindings.append(binding)
 
@@ -568,6 +1064,9 @@ def create_account_assignment(
     permission_set_name: str,
     principal_type: str,
     principal_id: str,
+    tracking_table_name: Optional[str] = None,
+    template_name: str = "",
+    group_name: str = "",
     poll_timeout_seconds: int = 60,
     poll_interval_seconds: float = 1.5,
 ) -> None:
@@ -581,6 +1080,9 @@ def create_account_assignment(
         permission_set_name: The name of the permission set
         principal_type: The type of principal
         principal_id: The ID of the principal
+        tracking_table_name: Optional name of DynamoDB tracking table (if provided, assignment will be recorded)
+        template_name: Name of the template this assignment came from
+        group_name: Display name of the group
         poll_timeout_seconds: The timeout for the poll
         poll_interval_seconds: The interval for the poll
 
@@ -606,28 +1108,40 @@ def create_account_assignment(
     # Check if the account assignment already exists
     resp = sso_admin.list_account_assignments(
         InstanceArn=instance_arn,
-        PrincipalId=principal_id,
-        PrincipalType=principal_type,
-        TargetId=target_account_id,
-        TargetType="AWS_ACCOUNT",
+        AccountId=target_account_id,
+        PermissionSetArn=permission_set_arn,
     )
-    if resp.get("AccountAssignments"):
+
+    # Filter the results to check if this specific principal has the assignment
+    existing_assignment = any(
+        assignment.get("PrincipalId") == principal_id
+        and assignment.get("PrincipalType") == principal_type
+        for assignment in resp.get("AccountAssignments", [])
+    )
+
+    if existing_assignment:
         logger.info(
             "Account assignment already exists, skipping",
             extra={
                 "action": "create_account_assignment",
                 "instance_arn": instance_arn,
+                "principal_id": principal_id,
+                "principal_type": principal_type,
+                "target_account_id": target_account_id,
             },
         )
         return
-    else:
-        logger.info(
-            "Account assignment does not exist, creating",
-            extra={
-                "action": "create_account_assignment",
-                "instance_arn": instance_arn,
-            },
-        )
+
+    logger.info(
+        "Account assignment does not exist, creating",
+        extra={
+            "action": "create_account_assignment",
+            "instance_arn": instance_arn,
+            "principal_id": principal_id,
+            "principal_type": principal_type,
+            "target_account_id": target_account_id,
+        },
+    )
 
     # Assign the permission set to the principal in the target account
     resp = sso_admin.create_account_assignment(
@@ -651,8 +1165,34 @@ def create_account_assignment(
 
         # Get the status of the account assignment creation
         state = status.get("Status")
-        # If the status is SUCCEEDED, return
+        # If the status is SUCCEEDED, record the assignment and return
         if state == "SUCCEEDED":
+            # If tracking is enabled, record this assignment
+            if tracking_table_name:
+                assignment_id = (
+                    f"{target_account_id}#{principal_id}#{permission_set_arn}"
+                )
+                try:
+                    record_tracking_assignment(
+                        tracking_table_name=tracking_table_name,
+                        assignment_id=assignment_id,
+                        account_id=target_account_id,
+                        permission_set_arn=permission_set_arn,
+                        permission_set_name=permission_set_name,
+                        principal_id=principal_id,
+                        principal_type=principal_type,
+                        template_name=template_name,
+                        group_name=group_name,
+                    )
+                except HandlerError as e:
+                    logger.warning(
+                        "Failed to record assignment in tracking table (but assignment was created)",
+                        extra={
+                            "action": "create_account_assignment",
+                            "assignment_id": assignment_id,
+                            "error": str(e),
+                        },
+                    )
             return
         # If the status is FAILED, raise an error
         if state == "FAILED":
@@ -677,15 +1217,17 @@ def create_account_assignment(
 
 
 def assign_permissions(
-    bindings: List[Binding],
+    bindings: list[Binding],
     instance_arn: str,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    tracking_table_name: Optional[str] = None,
+) -> Tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """
     Assign each binding's permission set to every listed Identity Center group.
 
     Args:
         bindings: Per-permission-set bindings for one account
         instance_arn: The ARN of the SSO Instance
+        tracking_table_name: Optional name of DynamoDB tracking table for recording assignments
     Returns:
         ``(successes, failures)`` for each attempted assignment
     """
@@ -710,9 +1252,9 @@ def assign_permissions(
         return [], []
 
     # Initialize the lists to store the successes and failures
-    successes: List[Dict[str, Any]] = []
+    successes: list[dict[str, Any]] = []
     # Initialize the list to store the failures
-    failures: List[Dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
 
     # Assign the permission set to the groups
     for binding in bindings:
@@ -726,6 +1268,9 @@ def assign_permissions(
                     principal_id=group.id,
                     principal_type="GROUP",
                     target_account_id=binding.account_id,
+                    tracking_table_name=tracking_table_name,
+                    template_name=binding.template_name,
+                    group_name=group.name,
                 )
                 # Add the success to the list
                 successes.append(
@@ -760,7 +1305,7 @@ def assign_permissions(
     return successes, failures
 
 
-def validate_environment() -> None: 
+def validate_environment() -> None:
     """
     Validate the environment variables.
 
@@ -769,7 +1314,8 @@ def validate_environment() -> None:
     """
 
     required_variables = [
-        "DYNAMODB_TABLE_NAME",
+        "DYNAMODB_CONFIG_TABLE",
+        "DYNAMODB_TRACKING_TABLE",
         "SSO_INSTANCE_ARN",
     ]
     for var in required_variables:
@@ -777,15 +1323,15 @@ def validate_environment() -> None:
             raise HandlerError(f"Missing required environment variable: {var}")
 
 
-def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     """
     Main Lambda handler for SSO group assignment.
 
     Args:
         event: EventBridge or Step Function event containing:
-            - source: "account_creation" or "cron_schedule"
-            - account_id: (optional) specific account ID for single-account mode
-        context: Lambda context object
+        - source: "account_creation" or "cron_schedule"
+        - account_id: (optional) specific account ID for single-account mode
+        _context: Lambda context object (unused, required by Lambda signature)
 
     Returns:
         Dictionary with status and optional error details
@@ -807,7 +1353,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # Ensure we have a valid environment
         validate_environment()
         # Get the environment variables
-        table_name = os.environ.get("DYNAMODB_TABLE_NAME")
+        tracking_table_name = os.environ.get("DYNAMODB_TRACKING_TABLE")
+        # Get the config table name
+        config_table_name = os.environ.get("DYNAMODB_CONFIG_TABLE")
         # Get the SSO Instance ARN
         instance_arn = os.environ.get("SSO_INSTANCE_ARN")
         # Get the tagging prefix (module doc default: ``sso``)
@@ -818,7 +1366,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             extra={
                 "action": "lambda_handler",
                 "instance_arn": instance_arn,
-                "table_name": table_name,
+                "config_table_name": config_table_name,
+                "tracking_table_name": tracking_table_name,
             },
         )
 
@@ -842,25 +1391,29 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             "Resolved execution targets",
             extra={
                 "action": "lambda_handler",
+                "config_table_name": config_table_name,
                 "source": source,
-                "target_accounts": target_accounts,
                 "target_accounts_count": len(target_accounts),
+                "target_accounts": target_accounts,
+                "tracking_table_name": tracking_table_name,
             },
         )
 
         # Initialize the lists to store the successes and failures
-        all_successes: List[Dict[str, Any]] = []
-        all_failures: List[Dict[str, Any]] = []
+        all_successes: list[dict[str, Any]] = []
+        all_failures: list[dict[str, Any]] = []
 
         # Load the group configurations from DynamoDB
-        configuration = load_configuration(table_name)
+        configuration = load_configuration(config_table_name)
         # Get the groups in the Identity Store
         identity_store_groups = get_identity_store_groups(identity_store_id)
         # Get the permission sets in the SSO Instance
         permission_sets = get_permission_sets(instance_arn)
+        ## Build a list of bindings for the account
+        all_bindings: list[Binding] = []
 
         # Iterate over the target accounts and assign the groups
-        # Logic: 
+        # Logic:
         # 1. Load the group configurations from DynamoDB
         # 2. Iterate over the target accounts
         # 4. We build a list of bindings for the account
@@ -870,8 +1423,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             account_tags = get_account_tags(account_id)
             # Get any permission tags for the account tags
             request_permissions = get_account_permission_tags(account_tags, tag_prefix)
-            ## Build a list of bindings for the account
-            all_bindings: List[Binding] = []
 
             # Iterate over the requests and build the bindings
             for request in request_permissions:
@@ -931,42 +1482,91 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 # Add the failures to the list
                 all_failures.extend(failures)
 
-            # We should at this point have all the bindings for the account
+        # We should at this point have all the bindings for all the accounts - we should
+        # iterate over the bindings and assign the permissions to the groups
+        if len(all_bindings) > 0:
             successes, failures = assign_permissions(
                 bindings=all_bindings,
                 instance_arn=instance_arn,
+                tracking_table_name=tracking_table_name,
             )
             # Add the successes to the list
             all_successes.extend(successes)
             # Add the failures to the list
             all_failures.extend(failures)
 
+        # Run reconciliation if tracking is enabled
+        reconciliation_deleted: list[dict[str, Any]] = []
+        reconciliation_failures: list[dict[str, Any]] = []
+
+        if tracking_table_name:
+            try:
+                reconciliation_deleted, reconciliation_failures = reconcile_assignments(
+                    instance_arn=instance_arn,
+                    desired_bindings=all_bindings,
+                    tracking_table_name=tracking_table_name,
+                    accounts_to_reconcile=target_accounts,
+                )
+                logger.info(
+                    "Completed assignment reconciliation",
+                    extra={
+                        "action": "lambda_handler",
+                        "deleted_count": len(reconciliation_deleted),
+                        "failure_count": len(reconciliation_failures),
+                    },
+                )
+            except Exception as e:
+                logger.error(
+                    "Reconciliation failed",
+                    extra={
+                        "action": "lambda_handler",
+                        "error": str(e),
+                    },
+                )
+                # Log reconciliation failures but don't fail the whole handler
+                reconciliation_failures.append(
+                    {"error": f"Reconciliation failed: {str(e)}"}
+                )
+
         # At the end of the loop, we should have all the bindings for the account
-        status = "success" if not all_failures else "failed"
+        status = (
+            "success" if not all_failures and not reconciliation_failures else "failed"
+        )
 
         logger.info(
             "Completed SSO group assignment run",
             extra={
                 "action": "lambda_handler",
-                "status": status,
-                "started_at": started_at,
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "assignments_succeeded": len(all_successes),
                 "assignments_failed": len(all_failures),
+                "assignments_succeeded": len(all_successes),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "reconciliation_deleted": len(reconciliation_deleted),
+                "reconciliation_failures": len(reconciliation_failures),
+                "started_at": started_at,
+                "status": status,
             },
         )
 
         return {
-            "status": status,
-            "source": source,
             "account_id": account_id,
-            "started_at": started_at,
             "finished_at": datetime.now(timezone.utc).isoformat(),
+            "source": source,
+            "started_at": started_at,
+            "status": status,
             "results": {
                 "succeeded": all_successes,
                 "failed": all_failures,
+                "reconciliation_deleted": reconciliation_deleted,
+                "reconciliation_failures": reconciliation_failures,
             },
-            "errors": None if not all_failures else {"count": len(all_failures), "items": all_failures},
+            "errors": (
+                None
+                if not all_failures and not reconciliation_failures
+                else {
+                    "count": len(all_failures) + len(reconciliation_failures),
+                    "items": all_failures + reconciliation_failures,
+                }
+            ),
         }
 
     except Exception as e:
@@ -979,12 +1579,12 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             exc_info=True,
         )
         return {
-            "status": "error",
-            "source": (event or {}).get("source", "unknown"),
             "account_id": (event or {}).get("account_id"),
-            "started_at": started_at,
-            "finished_at": datetime.now(timezone.utc).isoformat(),
-            "time_taken": time.time() - wall_start,
-            "results": None,
             "errors": {"message": str(e)},
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "results": None,
+            "source": (event or {}).get("source", "unknown"),
+            "started_at": started_at,
+            "status": "error",
+            "time_taken": time.time() - wall_start,
         }

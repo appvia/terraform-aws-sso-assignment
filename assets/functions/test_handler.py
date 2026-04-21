@@ -10,19 +10,29 @@ import os
 import sys
 from unittest.mock import MagicMock, patch
 
-import pytest
+import pytest  # pylint: disable=import-error
 from botocore.exceptions import ClientError
+
+# Prevent boto3/botocore from attempting to resolve credentials via local
+# credential_process helpers during import (e.g. `granted`), which is not
+# available/allowed in some test environments.
+os.environ.setdefault("AWS_ACCESS_KEY_ID", "test")
+os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "test")
+os.environ.setdefault("AWS_SESSION_TOKEN", "test")
+os.environ.setdefault("AWS_DEFAULT_REGION", "eu-west-1")
+os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
 
 # Import the module under test from the same directory (no package layout).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import handler  # noqa: E402
+import handler  # noqa: E402 pylint: disable=wrong-import-position
 
 
 @pytest.fixture(autouse=True)
 def restore_env():
     """Snapshot env vars touched by tests and restore after each test."""
     keys = (
-        "DYNAMODB_TABLE_NAME",
+        "DYNAMODB_TRACKING_TABLE",
+        "DYNAMODB_CONFIG_TABLE",
         "SSO_INSTANCE_ARN",
         "SSO_ACCOUNT_TAG_PREFIX",
         "LOG_LEVEL",
@@ -40,10 +50,10 @@ def restore_env():
 class TestConfigurationModel:
     def test_groups_map_contains_templates(self):
         cfg = handler.Configuration(
-            groups={"sso/tpl": handler.GroupConfiguration(permission_sets=["Admin"])}
+            groups={"tpl": handler.GroupConfiguration(permission_sets=["Admin"])}
         )
-        assert "sso/tpl" in cfg.groups
-        assert cfg.groups["sso/tpl"].permission_sets == ["Admin"]
+        assert "tpl" in cfg.groups
+        assert cfg.groups["tpl"].permission_sets == ["Admin"]
 
 
 class TestPermissionAndBindingModels:
@@ -85,11 +95,13 @@ class TestDataclassToJson:
 
     def test_configuration_nested_json(self):
         cfg = handler.Configuration(
-            groups={"sso/x": handler.GroupConfiguration(permission_sets=["P"], description="d")}
+            groups={
+                "x": handler.GroupConfiguration(permission_sets=["P"], description="d")
+            }
         )
         data = json.loads(cfg.to_json())
-        assert data["groups"]["sso/x"]["permission_sets"] == ["P"]
-        assert data["groups"]["sso/x"]["description"] == "d"
+        assert data["groups"]["x"]["permission_sets"] == ["P"]
+        assert data["groups"]["x"]["description"] == "d"
 
 
 class TestHandlerError:
@@ -107,7 +119,10 @@ class TestGetIdentityStoreId:
         paginator.paginate.return_value = [
             {
                 "Instances": [
-                    {"InstanceArn": "arn:aws:sso:::instance/other", "IdentityStoreId": "d-WRONG"},
+                    {
+                        "InstanceArn": "arn:aws:sso:::instance/other",
+                        "IdentityStoreId": "d-WRONG",
+                    },
                     {
                         "InstanceArn": "arn:aws:sso:::instance/want",
                         "IdentityStoreId": "d-12345",
@@ -116,7 +131,10 @@ class TestGetIdentityStoreId:
             }
         ]
         with patch.object(handler, "sso_admin", mock_sso):
-            assert handler.get_identity_store_id("arn:aws:sso:::instance/want") == "d-12345"
+            assert (
+                handler.get_identity_store_id("arn:aws:sso:::instance/want")
+                == "d-12345"
+            )
 
     def test_raises_when_not_found(self):
         mock_sso = MagicMock()
@@ -132,15 +150,27 @@ class TestGetIdentityStoreId:
         paginator = MagicMock()
         mock_sso.get_paginator.return_value = paginator
         paginator.paginate.return_value = [
-            {"Instances": [{"InstanceArn": "arn:aws:sso:::instance/a", "IdentityStoreId": "d-A"}]},
             {
                 "Instances": [
-                    {"InstanceArn": "arn:aws:sso:::instance/want", "IdentityStoreId": "d-WANT"},
+                    {
+                        "InstanceArn": "arn:aws:sso:::instance/a",
+                        "IdentityStoreId": "d-A",
+                    }
+                ]
+            },
+            {
+                "Instances": [
+                    {
+                        "InstanceArn": "arn:aws:sso:::instance/want",
+                        "IdentityStoreId": "d-WANT",
+                    },
                 ]
             },
         ]
         with patch.object(handler, "sso_admin", mock_sso):
-            assert handler.get_identity_store_id("arn:aws:sso:::instance/want") == "d-WANT"
+            assert (
+                handler.get_identity_store_id("arn:aws:sso:::instance/want") == "d-WANT"
+            )
 
 
 class TestGetPermissionSets:
@@ -222,17 +252,23 @@ class TestGetAccountTags:
     def test_returns_key_value_map(self):
         mock_org = MagicMock()
         mock_org.list_tags_for_resource.return_value = {
-            "Tags": [{"Key": "sso/default", "Value": "g1,g2"}, {"Key": "other", "Value": "x"}]
+            "Tags": [
+                {"Key": "sso/default", "Value": "g1,g2"},
+                {"Key": "other", "Value": "x"},
+            ]
         }
         with patch.object(handler, "organizations", mock_org):
             tags = handler.get_account_tags("123456789012")
         assert tags == {"sso/default": "g1,g2", "other": "x"}
-        mock_org.list_tags_for_resource.assert_called_once_with(ResourceId="123456789012")
+        mock_org.list_tags_for_resource.assert_called_once_with(
+            ResourceId="123456789012"
+        )
 
     def test_raises_handler_error_on_client_error(self):
         mock_org = MagicMock()
         mock_org.list_tags_for_resource.side_effect = ClientError(
-            {"Error": {"Code": "AccessDenied", "Message": "nope"}}, "ListTagsForResource"
+            {"Error": {"Code": "AccessDenied", "Message": "nope"}},
+            "ListTagsForResource",
         )
         with patch.object(handler, "organizations", mock_org):
             with pytest.raises(handler.HandlerError, match="Could not list tags"):
@@ -249,7 +285,8 @@ class TestEnsureAccountExists:
     def test_raises_handler_error_on_client_error(self):
         mock_org = MagicMock()
         mock_org.describe_account.side_effect = ClientError(
-            {"Error": {"Code": "AccountNotFound", "Message": "missing"}}, "DescribeAccount"
+            {"Error": {"Code": "AccountNotFound", "Message": "missing"}},
+            "DescribeAccount",
         )
         with patch.object(handler, "organizations", mock_org):
             with pytest.raises(handler.HandlerError, match="not found"):
@@ -265,12 +302,12 @@ class TestGetAccountPermissionTags:
         }
         perms = handler.get_account_permission_tags(tags, "sso")
         by_name = {p.name: p.groups for p in perms}
-        assert by_name["sso/default"] == ["Alpha", "Beta"]
-        assert by_name["sso/other"] == ["Gamma"]
+        assert by_name["default"] == ["Alpha", "Beta"]
+        assert by_name["other"] == ["Gamma"]
         assert len(perms) == 2
 
     def test_empty_when_no_matching_prefix(self):
-        assert handler.get_account_permission_tags({"a": "b"}, "sso") == []
+        assert not handler.get_account_permission_tags({"a": "b"}, "sso")
 
 
 class TestLoadConfiguration:
@@ -280,17 +317,17 @@ class TestLoadConfiguration:
             {
                 "Items": [
                     {
-                        "group_name": "sso/a",
+                        "group_name": "a",
                         "permission_sets": ["P1"],
                         "enabled": False,
                         "description": "d1",
                     }
                 ],
-                "LastEvaluatedKey": {"group_name": "sso/a"},
+                "LastEvaluatedKey": {"group_name": "a"},
             },
             {
                 "Items": [
-                    {"group_name": "sso/b"},
+                    {"group_name": "b"},
                 ],
             },
         ]
@@ -299,12 +336,12 @@ class TestLoadConfiguration:
         with patch.object(handler, "dynamodb", mock_resource):
             cfg = handler.load_configuration("my-table")
         mock_resource.Table.assert_called_once_with("my-table")
-        assert set(cfg.groups) == {"sso/a", "sso/b"}
-        assert cfg.groups["sso/a"].permission_sets == ["P1"]
-        assert cfg.groups["sso/a"].enabled is False
-        assert cfg.groups["sso/a"].description == "d1"
-        assert cfg.groups["sso/b"].permission_sets == []
-        assert cfg.groups["sso/b"].enabled is True
+        assert set(cfg.groups) == {"a", "b"}
+        assert cfg.groups["a"].permission_sets == ["P1"]
+        assert cfg.groups["a"].enabled is False
+        assert cfg.groups["a"].description == "d1"
+        assert cfg.groups["b"].permission_sets == []
+        assert cfg.groups["b"].enabled is True
 
 
 class TestGetBindings:
@@ -318,7 +355,7 @@ class TestGetBindings:
             request=req,
             template=template,
         )
-        assert successes == [] and failures == []
+        assert not successes and not failures
         assert len(bindings) == 2
         assert {b.permission_set_name for b in bindings} == {"Admin", "ReadOnly"}
         assert all(b.account_id == "123456789012" for b in bindings)
@@ -335,7 +372,7 @@ class TestGetBindings:
             request=req,
             template=template,
         )
-        assert successes == []
+        assert not successes
         assert len(failures) == 1
         assert failures[0]["group"] == "Missing"
         assert len(bindings) == 1
@@ -345,14 +382,14 @@ class TestGetBindings:
     def test_unknown_permission_set_appends_failure(self):
         req = handler.Permission(name="sso/tpl", groups=["G1"])
         template = handler.GroupConfiguration(permission_sets=["Nope"])
-        bindings, successes, failures = handler.get_bindings(
+        bindings, _successes, failures = handler.get_bindings(
             account_id="123456789012",
             identity_store_groups={"G1": "id-1"},
             permission_sets={"Admin": "arn:a"},
             request=req,
             template=template,
         )
-        assert bindings == []
+        assert not bindings
         assert len(failures) == 1
         assert failures[0]["permission"] == "Nope"
 
@@ -363,10 +400,12 @@ class TestGetPermissionSetsEdgeCases:
         paginator = MagicMock()
         mock_sso.get_paginator.return_value = paginator
         paginator.paginate.return_value = [{"PermissionSets": ["arn:ps:1"]}]
-        mock_sso.describe_permission_set.return_value = {"PermissionSet": {"Name": None}}
+        mock_sso.describe_permission_set.return_value = {
+            "PermissionSet": {"Name": None}
+        }
         with patch.object(handler, "sso_admin", mock_sso):
             result = handler.get_permission_sets("arn:aws:sso:::instance/x")
-        assert result == {}
+        assert not result
 
 
 class TestCreateAccountAssignment:
@@ -398,10 +437,8 @@ class TestCreateAccountAssignment:
             )
         mock_sso.list_account_assignments.assert_called_once_with(
             InstanceArn="arn:i",
-            PrincipalId="g-1",
-            PrincipalType="GROUP",
-            TargetId="123456789012",
-            TargetType="AWS_ACCOUNT",
+            AccountId="123456789012",
+            PermissionSetArn="arn:ps",
         )
         mock_sso.create_account_assignment.assert_called_once()
 
@@ -430,10 +467,8 @@ class TestCreateAccountAssignment:
             )
         mock_sso.list_account_assignments.assert_called_once_with(
             InstanceArn="arn:i",
-            PrincipalId="g-1",
-            PrincipalType="GROUP",
-            TargetId="123456789012",
-            TargetType="AWS_ACCOUNT",
+            AccountId="123456789012",
+            PermissionSetArn="arn:ps",
         )
         mock_sso.create_account_assignment.assert_not_called()
         mock_sso.describe_account_assignment_creation_status.assert_not_called()
@@ -445,7 +480,10 @@ class TestCreateAccountAssignment:
             "AccountAssignmentCreationStatus": {"RequestId": "req-1"}
         }
         mock_sso.describe_account_assignment_creation_status.return_value = {
-            "AccountAssignmentCreationStatus": {"Status": "FAILED", "FailureReason": "boom"}
+            "AccountAssignmentCreationStatus": {
+                "Status": "FAILED",
+                "FailureReason": "boom",
+            }
         }
         with patch.object(handler, "sso_admin", mock_sso):
             with pytest.raises(handler.HandlerError, match="boom"):
@@ -489,16 +527,15 @@ class TestAssignPermissions:
     def test_empty_bindings(self, caplog):
         caplog.set_level(logging.WARNING)
         ok, bad = handler.assign_permissions([], "arn:i")
-        assert ok == [] and bad == []
+        assert not ok and not bad
 
     def test_records_successes_and_failures(self):
         calls = {"n": 0}
 
-        def fake_create(**kwargs):
+        def fake_create(**_kwargs):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise handler.HandlerError("first fails")
-            return None
 
         bindings = [
             handler.Binding(
@@ -511,7 +548,9 @@ class TestAssignPermissions:
                 ],
             )
         ]
-        with patch.object(handler, "create_account_assignment", side_effect=fake_create):
+        with patch.object(
+            handler, "create_account_assignment", side_effect=fake_create
+        ):
             successes, failures = handler.assign_permissions(bindings, "arn:i")
         assert len(successes) == 1
         assert successes[0]["group_name"] == "G2"
@@ -521,13 +560,15 @@ class TestAssignPermissions:
 
 class TestValidateEnvironment:
     def test_raises_when_missing(self):
-        os.environ.pop("DYNAMODB_TABLE_NAME", None)
+        os.environ.pop("DYNAMODB_CONFIG_TABLE", None)
         os.environ.pop("SSO_INSTANCE_ARN", None)
-        with pytest.raises(handler.HandlerError, match="DYNAMODB_TABLE_NAME"):
+        os.environ.pop("DYNAMODB_TRACKING_TABLE", None)
+        with pytest.raises(handler.HandlerError, match="DYNAMODB_CONFIG_TABLE"):
             handler.validate_environment()
 
     def test_ok_when_set(self):
-        os.environ["DYNAMODB_TABLE_NAME"] = "t"
+        os.environ["DYNAMODB_CONFIG_TABLE"] = "t"
+        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
         os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
         handler.validate_environment()
 
@@ -554,12 +595,14 @@ class TestJSONFormatter:
 
 class TestLambdaHandler:
     def test_error_status_when_required_env_missing(self):
-        os.environ.pop("DYNAMODB_TABLE_NAME", None)
+        os.environ.pop("DYNAMODB_CONFIG_TABLE", None)
+        os.environ.pop("DYNAMODB_TRACKING_TABLE", None)
         os.environ.pop("SSO_INSTANCE_ARN", None)
         out = handler.lambda_handler({"source": "account_creation"}, None)
         assert out["status"] == "error"
         assert "Missing required environment variable" in out["errors"]["message"]
 
+    @patch.object(handler, "reconcile_assignments", return_value=([], []))
     @patch.object(handler, "assign_permissions", return_value=([], []))
     @patch.object(handler, "get_permission_sets", return_value={"Admin": "arn:ps"})
     @patch.object(handler, "get_identity_store_groups", return_value={"MyGroup": "g-1"})
@@ -570,22 +613,26 @@ class TestLambdaHandler:
     @patch.object(handler, "get_identity_store_id", return_value="d-store")
     def test_single_account_success_path(
         self,
-        mock_get_identity_store_id,
+        _mock_get_identity_store_id,
         mock_list_active,
         mock_ensure,
-        mock_get_account_tags,
+        _mock_get_account_tags,
         mock_load_cfg,
-        mock_get_groups,
-        mock_get_ps,
+        _mock_get_groups,
+        _mock_get_ps,
         mock_assign,
+        _mock_reconcile,
     ):
-        os.environ["DYNAMODB_TABLE_NAME"] = "tbl"
+        os.environ["DYNAMODB_CONFIG_TABLE"] = "cfg"
+        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
         os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
         os.environ["SSO_ACCOUNT_TAG_PREFIX"] = "sso"
 
         cfg = handler.Configuration(
             groups={
-                "sso/tpl": handler.GroupConfiguration(permission_sets=["Admin"], enabled=True),
+                "tpl": handler.GroupConfiguration(
+                    permission_sets=["Admin"], enabled=True
+                ),
             }
         )
         mock_load_cfg.return_value = cfg
@@ -598,7 +645,7 @@ class TestLambdaHandler:
         mock_ensure.assert_called_once_with("123456789012")
         mock_list_active.assert_not_called()
         mock_assign.assert_called_once()
-        args, kwargs = mock_assign.call_args
+        _args, kwargs = mock_assign.call_args
         assert kwargs["instance_arn"] == "arn:aws:sso:::instance/x"
         bound = kwargs["bindings"]
         assert len(bound) == 1
@@ -606,6 +653,7 @@ class TestLambdaHandler:
         assert bound[0].permission_set_name == "Admin"
         assert bound[0].groups[0].name == "MyGroup"
 
+    @patch.object(handler, "reconcile_assignments", return_value=([], []))
     @patch.object(handler, "assign_permissions", return_value=([], []))
     @patch.object(handler, "get_permission_sets", return_value={"Admin": "arn:ps"})
     @patch.object(handler, "get_identity_store_groups", return_value={"MyGroup": "g-1"})
@@ -616,21 +664,23 @@ class TestLambdaHandler:
     @patch.object(handler, "get_identity_store_id", return_value="d-store")
     def test_cron_uses_list_active_accounts(
         self,
-        mock_get_identity_store_id,
+        _mock_get_identity_store_id,
         mock_list_active,
         mock_ensure,
-        mock_get_account_tags,
+        _mock_get_account_tags,
         mock_load_cfg,
-        mock_get_groups,
-        mock_get_ps,
-        mock_assign,
+        _mock_get_groups,
+        _mock_get_ps,
+        _mock_assign,
+        _mock_reconcile,
     ):
-        os.environ["DYNAMODB_TABLE_NAME"] = "tbl"
+        os.environ["DYNAMODB_CONFIG_TABLE"] = "cfg"
+        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
         os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
         os.environ["SSO_ACCOUNT_TAG_PREFIX"] = "sso"
 
         mock_load_cfg.return_value = handler.Configuration(
-            groups={"sso/tpl": handler.GroupConfiguration(permission_sets=["Admin"])}
+            groups={"tpl": handler.GroupConfiguration(permission_sets=["Admin"])}
         )
 
         out = handler.lambda_handler({"source": "cron_schedule"}, None)
@@ -638,6 +688,7 @@ class TestLambdaHandler:
         mock_list_active.assert_called_once()
         mock_ensure.assert_not_called()
 
+    @patch.object(handler, "reconcile_assignments", return_value=([], []))
     @patch.object(handler, "assign_permissions", return_value=([], []))
     @patch.object(handler, "get_permission_sets", return_value={"Admin": "arn:ps"})
     @patch.object(handler, "get_identity_store_groups", return_value={"MyGroup": "g-1"})
@@ -648,21 +699,23 @@ class TestLambdaHandler:
     @patch.object(handler, "get_identity_store_id", return_value="d-store")
     def test_default_tag_prefix_sso_when_env_unset(
         self,
-        mock_get_identity_store_id,
-        mock_list_active,
-        mock_ensure,
+        _mock_get_identity_store_id,
+        _mock_list_active,
+        _mock_ensure,
         mock_get_account_tags,
         mock_load_cfg,
-        mock_get_groups,
-        mock_get_ps,
+        _mock_get_groups,
+        _mock_get_ps,
         mock_assign,
+        _mock_reconcile,
     ):
-        os.environ["DYNAMODB_TABLE_NAME"] = "tbl"
+        os.environ["DYNAMODB_CONFIG_TABLE"] = "cfg"
+        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
         os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
         os.environ.pop("SSO_ACCOUNT_TAG_PREFIX", None)
 
         mock_load_cfg.return_value = handler.Configuration(
-            groups={"sso/tpl": handler.GroupConfiguration(permission_sets=["Admin"])}
+            groups={"tpl": handler.GroupConfiguration(permission_sets=["Admin"])}
         )
 
         out = handler.lambda_handler(
@@ -673,6 +726,7 @@ class TestLambdaHandler:
         mock_get_account_tags.assert_called()
         mock_assign.assert_called_once()
 
+    @patch.object(handler, "reconcile_assignments", return_value=([], []))
     @patch.object(handler, "assign_permissions", return_value=([], []))
     @patch.object(handler, "get_permission_sets", return_value={"Admin": "arn:ps"})
     @patch.object(handler, "get_identity_store_groups", return_value={"MyGroup": "g-1"})
@@ -683,16 +737,18 @@ class TestLambdaHandler:
     @patch.object(handler, "get_identity_store_id", return_value="d-store")
     def test_unknown_template_records_failure_and_failed_status(
         self,
-        mock_get_identity_store_id,
-        mock_list_active,
-        mock_ensure,
-        mock_get_account_tags,
+        _mock_get_identity_store_id,
+        _mock_list_active,
+        _mock_ensure,
+        _mock_get_account_tags,
         mock_load_cfg,
-        mock_get_groups,
-        mock_get_ps,
+        _mock_get_groups,
+        _mock_get_ps,
         mock_assign,
+        _mock_reconcile,
     ):
-        os.environ["DYNAMODB_TABLE_NAME"] = "tbl"
+        os.environ["DYNAMODB_CONFIG_TABLE"] = "cfg"
+        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
         os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
         os.environ["SSO_ACCOUNT_TAG_PREFIX"] = "sso"
 
@@ -704,9 +760,13 @@ class TestLambdaHandler:
         )
         assert out["status"] == "failed"
         assert out["errors"]["count"] == 1
-        assert out["results"]["failed"][0]["error"] == "Permission template not found in configuration"
-        mock_assign.assert_called_once()
-        assert mock_assign.call_args.kwargs["bindings"] == []
+        assert (
+            out["results"]["failed"][0]["error"]
+            == "Permission template not found in configuration"
+        )
+        # No bindings are produced for an unknown template, so we should not
+        # attempt to call assign_permissions at all.
+        mock_assign.assert_not_called()
 
     @patch.object(handler, "assign_permissions", return_value=([], []))
     @patch.object(handler, "get_permission_sets", return_value={"Admin": "arn:ps"})
@@ -718,21 +778,26 @@ class TestLambdaHandler:
     @patch.object(handler, "get_identity_store_id", return_value="d-store")
     def test_disabled_template_records_failure(
         self,
-        mock_get_identity_store_id,
-        mock_list_active,
-        mock_ensure,
-        mock_get_account_tags,
+        _mock_get_identity_store_id,
+        _mock_list_active,
+        _mock_ensure,
+        _mock_get_account_tags,
         mock_load_cfg,
-        mock_get_groups,
-        mock_get_ps,
-        mock_assign,
+        _mock_get_groups,
+        _mock_get_ps,
+        _mock_assign,
     ):
-        os.environ["DYNAMODB_TABLE_NAME"] = "tbl"
+        os.environ["DYNAMODB_CONFIG_TABLE"] = "cfg"
+        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
         os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
         os.environ["SSO_ACCOUNT_TAG_PREFIX"] = "sso"
 
         mock_load_cfg.return_value = handler.Configuration(
-            groups={"sso/tpl": handler.GroupConfiguration(permission_sets=["Admin"], enabled=False)}
+            groups={
+                "tpl": handler.GroupConfiguration(
+                    permission_sets=["Admin"], enabled=False
+                )
+            }
         )
 
         out = handler.lambda_handler(
@@ -747,37 +812,46 @@ class TestLambdaHandler:
     @patch.object(handler, "get_identity_store_groups", return_value={"MyGroup": "g-1"})
     @patch.object(handler, "load_configuration")
     @patch.object(handler, "get_account_tags", return_value={"sso/tpl": "MyGroup"})
+    @patch.object(handler, "reconcile_assignments", return_value=([], []))
     @patch.object(handler, "ensure_account_exists")
-    @patch.object(handler, "list_active_accounts", return_value=["111111111111", "222222222222"])
+    @patch.object(
+        handler, "list_active_accounts", return_value=["111111111111", "222222222222"]
+    )
     @patch.object(handler, "get_identity_store_id", return_value="d-store")
     def test_cron_accumulates_bindings_across_accounts(
         self,
-        mock_get_identity_store_id,
-        mock_list_active,
-        mock_ensure,
-        mock_get_account_tags,
+        _mock_get_identity_store_id,
+        _mock_list_active,
+        _mock_ensure,
+        mock_reconcile,
+        _mock_get_account_tags,
         mock_load_cfg,
-        mock_get_groups,
-        mock_get_ps,
+        _mock_get_groups,
+        _mock_get_ps,
         mock_assign,
     ):
-        os.environ["DYNAMODB_TABLE_NAME"] = "tbl"
+        os.environ["DYNAMODB_CONFIG_TABLE"] = "tbl"
+        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
         os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
         os.environ["SSO_ACCOUNT_TAG_PREFIX"] = "sso"
 
         mock_load_cfg.return_value = handler.Configuration(
-            groups={"sso/tpl": handler.GroupConfiguration(permission_sets=["Admin"])}
+            groups={"tpl": handler.GroupConfiguration(permission_sets=["Admin"])}
         )
 
         handler.lambda_handler({"source": "cron_schedule"}, None)
 
-        # assign_permissions runs once per target account (inside the account loop).
-        assert mock_assign.call_count == 2
-        accts = [
-            mock_assign.call_args_list[i].kwargs["bindings"][0].account_id
-            for i in range(2)
-        ]
-        assert set(accts) == {"111111111111", "222222222222"}
+        # assign_permissions runs once with all bindings across accounts.
+        mock_assign.assert_called_once()
+        bindings = mock_assign.call_args.kwargs["bindings"]
+        assert len(bindings) == 2
+        assert {b.account_id for b in bindings} == {"111111111111", "222222222222"}
+
+        # Reconciliation runs once with the full desired bindings.
+        mock_reconcile.assert_called_once()
+        assert (
+            mock_reconcile.call_args.kwargs["desired_bindings"] == bindings
+        ), "Reconcile should receive all desired bindings"
 
     @patch.object(
         handler,
@@ -796,21 +870,22 @@ class TestLambdaHandler:
     @patch.object(handler, "get_identity_store_id", return_value="d-store")
     def test_failed_status_when_assign_permissions_reports_failures(
         self,
-        mock_get_identity_store_id,
-        mock_list_active,
-        mock_ensure,
-        mock_get_account_tags,
+        _mock_get_identity_store_id,
+        _mock_list_active,
+        _mock_ensure,
+        _mock_get_account_tags,
         mock_load_cfg,
-        mock_get_groups,
-        mock_get_ps,
-        mock_assign,
+        _mock_get_groups,
+        _mock_get_ps,
+        _mock_assign,
     ):
-        os.environ["DYNAMODB_TABLE_NAME"] = "tbl"
+        os.environ["DYNAMODB_CONFIG_TABLE"] = "tbl"
+        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
         os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
         os.environ["SSO_ACCOUNT_TAG_PREFIX"] = "sso"
 
         mock_load_cfg.return_value = handler.Configuration(
-            groups={"sso/tpl": handler.GroupConfiguration(permission_sets=["Admin"])}
+            groups={"tpl": handler.GroupConfiguration(permission_sets=["Admin"])}
         )
 
         out = handler.lambda_handler(
@@ -822,10 +897,400 @@ class TestLambdaHandler:
 
     @patch.object(handler, "get_identity_store_id", side_effect=RuntimeError("boom"))
     def test_unhandled_exception_returns_error_payload(self, _mock):
-        os.environ["DYNAMODB_TABLE_NAME"] = "tbl"
+        os.environ["DYNAMODB_CONFIG_TABLE"] = "cfg"
+        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
         os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
         out = handler.lambda_handler({"source": "x", "account_id": "1"}, None)
         assert out["status"] == "error"
         assert out["errors"]["message"] == "boom"
         assert isinstance(out["time_taken"], float)
         assert out["time_taken"] >= 0
+
+
+class TestRecordAssignment:
+    """Test assignment tracking record functionality."""
+
+    def test_records_assignment_to_dynamodb(self):
+        """Test that a successful assignment is recorded to the tracking table."""
+        mock_dynamodb = MagicMock()
+        mock_table = MagicMock()
+        mock_dynamodb.Table.return_value = mock_table
+
+        with patch.object(handler, "dynamodb", mock_dynamodb):
+            handler.record_tracking_assignment(
+                tracking_table_name="tracking_tbl",
+                assignment_id="123456789012#g-1#arn:ps",
+                account_id="123456789012",
+                permission_set_arn="arn:ps",
+                permission_set_name="Admin",
+                principal_id="g-1",
+                principal_type="GROUP",
+                template_name="default",
+                group_name="test-group",
+            )
+
+        mock_dynamodb.Table.assert_called_once_with("tracking_tbl")
+        # Verify put_item was called
+        mock_table.put_item.assert_called_once()
+        item = mock_table.put_item.call_args[1]["Item"]
+        assert item["assignment_id"] == "123456789012#g-1#arn:ps"
+        assert item["account_id"] == "123456789012"
+        assert item["permission_set_arn"] == "arn:ps"
+        assert item["permission_set_name"] == "Admin"
+        assert item["principal_id"] == "g-1"
+        assert item["principal_type"] == "GROUP"
+        assert item["template_name"] == "default"
+        assert item["group_name"] == "test-group"
+
+    def test_raises_on_dynamodb_error(self):
+        """Test that a ClientError is properly handled and re-raised."""
+        mock_dynamodb = MagicMock()
+        mock_table = MagicMock()
+        mock_dynamodb.Table.return_value = mock_table
+        mock_table.put_item.side_effect = ClientError(
+            {"Error": {"Code": "ValidationException", "Message": "boom"}}, "PutItem"
+        )
+
+        with patch.object(handler, "dynamodb", mock_dynamodb):
+            with pytest.raises(
+                handler.HandlerError, match="Could not record assignment"
+            ):
+                handler.record_tracking_assignment(
+                    tracking_table_name="tracking_tbl",
+                    assignment_id="123456789012#g-1#arn:ps",
+                    account_id="123456789012",
+                    permission_set_arn="arn:ps",
+                    permission_set_name="Admin",
+                    principal_id="g-1",
+                    principal_type="GROUP",
+                    template_name="default",
+                    group_name="test-group",
+                )
+
+
+class TestGetTrackingAssignments:
+    """Test retrieval of tracked assignments."""
+
+    def test_retrieves_assignments(self):
+        """Test that assignments are retrieved via scan."""
+        mock_dynamodb = MagicMock()
+        mock_table = MagicMock()
+        mock_dynamodb.Table.return_value = mock_table
+
+        mock_table.scan.return_value = {
+            "Items": [
+                {
+                    "assignment_id": "123456789012#g-1#arn:ps1",
+                    "account_id": "123456789012",
+                    "permission_set_arn": "arn:ps1",
+                    "permission_set_name": "Admin",
+                    "principal_id": "g-1",
+                    "principal_type": "GROUP",
+                    "template_name": "default",
+                    "group_name": "test-group",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "last_seen": "2026-01-01T00:00:00+00:00",
+                }
+            ],
+        }
+
+        with patch.object(handler, "dynamodb", mock_dynamodb):
+            result = handler.get_tracking_assignments("tracking")
+
+        assert len(result) == 1
+        assert result[0].assignment_id == "123456789012#g-1#arn:ps1"
+        assert result[0].account_id == "123456789012"
+
+        mock_table.scan.assert_called_once()
+
+    def test_raises_on_dynamodb_error(self):
+        """Test that a ClientError is properly handled and re-raised."""
+        mock_dynamodb = MagicMock()
+        mock_table = MagicMock()
+        mock_dynamodb.Table.return_value = mock_table
+        mock_table.scan.side_effect = ClientError(
+            {"Error": {"Code": "ResourceNotFoundException", "Message": "boom"}}, "Scan"
+        )
+
+        with patch.object(handler, "dynamodb", mock_dynamodb):
+            with pytest.raises(handler.HandlerError, match="Could not get assignments"):
+                handler.get_tracking_assignments("tracking")
+
+
+class TestDeletePermission:
+    """Test assignment deletion functionality."""
+
+    def test_successfully_deletes_assignment(self):
+        """Test that an assignment is successfully deleted."""
+        mock_sso = MagicMock()
+        mock_sso.delete_account_assignment.return_value = {
+            "AccountAssignmentDeletionStatus": {"RequestId": "req-1"}
+        }
+        mock_sso.describe_account_assignment_deletion_status.return_value = {
+            "AccountAssignmentDeletionStatus": {"Status": "SUCCEEDED"}
+        }
+
+        with patch.object(handler, "sso_admin", mock_sso):
+            handler.delete_permission(
+                instance_arn="arn:i",
+                account_id="123456789012",
+                permission_set_arn="arn:ps",
+                principal_id="g-1",
+                principal_type="GROUP",
+                poll_timeout_seconds=5,
+                poll_interval_seconds=0.01,
+            )
+
+        mock_sso.delete_account_assignment.assert_called_once_with(
+            InstanceArn="arn:i",
+            PermissionSetArn="arn:ps",
+            PrincipalId="g-1",
+            PrincipalType="GROUP",
+            TargetId="123456789012",
+            TargetType="AWS_ACCOUNT",
+        )
+        mock_sso.describe_account_assignment_deletion_status.assert_called_once()
+
+    def test_raises_on_failed_deletion(self):
+        """Test that a failed deletion raises an error."""
+        mock_sso = MagicMock()
+        mock_sso.delete_account_assignment.return_value = {
+            "AccountAssignmentDeletionStatus": {"RequestId": "req-1"}
+        }
+        mock_sso.describe_account_assignment_deletion_status.return_value = {
+            "AccountAssignmentDeletionStatus": {
+                "Status": "FAILED",
+                "FailureReason": "boom",
+            }
+        }
+
+        with patch.object(handler, "sso_admin", mock_sso):
+            with pytest.raises(handler.HandlerError, match="boom"):
+                handler.delete_permission(
+                    instance_arn="arn:i",
+                    account_id="123456789012",
+                    permission_set_arn="arn:ps",
+                    principal_id="g-1",
+                    principal_type="GROUP",
+                    poll_timeout_seconds=5,
+                    poll_interval_seconds=0.01,
+                )
+
+    def test_raises_on_timeout(self):
+        """Test that a timeout raises an error."""
+        mock_sso = MagicMock()
+        mock_sso.delete_account_assignment.return_value = {
+            "AccountAssignmentDeletionStatus": {"RequestId": "req-1"}
+        }
+        mock_sso.describe_account_assignment_deletion_status.return_value = {
+            "AccountAssignmentDeletionStatus": {"Status": "IN_PROGRESS"}
+        }
+
+        with patch.object(handler, "sso_admin", mock_sso):
+            with patch("handler.time.time", side_effect=[0, 100]):
+                with patch("handler.time.sleep"):
+                    with pytest.raises(handler.HandlerError, match="Timed out"):
+                        handler.delete_permission(
+                            instance_arn="arn:i",
+                            account_id="123456789012",
+                            permission_set_arn="arn:ps",
+                            principal_id="g-1",
+                            principal_type="GROUP",
+                            poll_timeout_seconds=5,
+                            poll_interval_seconds=0.01,
+                        )
+
+
+class TestHasMatchingBinding:
+    def test_returns_true_when_binding_contains_matching_group_among_multiple(self):
+        assignment = handler.TrackedAssignment(
+            assignment_id="123456789012#g-2#arn:ps",
+            account_id="123456789012",
+            permission_set_arn="arn:ps",
+            permission_set_name="Admin",
+            principal_id="g-2",
+            principal_type="GROUP",
+            template_name="t",
+            group_name="TeamB",
+        )
+        binding = handler.Binding(
+            account_id="123456789012",
+            permission_set_name="Admin",
+            permission_set_arn="arn:ps",
+            groups=[
+                handler.Group(name="TeamA", id="g-1"),
+                handler.Group(name="TeamB", id="g-2"),
+                handler.Group(name="TeamC", id="g-3"),
+            ],
+            template_name="t",
+        )
+
+        assert (
+            handler.has_matching_binding(assignment=assignment, bindings=[binding])
+            is True
+        )
+
+
+class TestReconcileAssignments:
+    """Test assignment reconciliation functionality."""
+
+    def test_deletes_provisioned_assignment_not_in_desired_bindings(self):
+        mock_sso = MagicMock()
+        mock_dynamodb = MagicMock()
+        mock_table = MagicMock()
+        mock_dynamodb.Table.return_value = mock_table
+
+        # Create a tracked assignment that is NOT in desired bindings
+        tracked_assignment = handler.TrackedAssignment(
+            assignment_id="123456789012#g-extra#arn:ps-extra",
+            account_id="123456789012",
+            permission_set_arn="arn:ps-extra",
+            permission_set_name="Extra",
+            principal_id="g-extra",
+            principal_type="GROUP",
+            template_name="t",
+            group_name="extra",
+            created_at="2025-01-01T00:00:00Z",
+            last_seen="2025-01-01T00:00:00Z",
+        )
+
+        # Deletion succeeds
+        mock_sso.delete_account_assignment.return_value = {
+            "AccountAssignmentDeletionStatus": {"RequestId": "req-1"}
+        }
+        mock_sso.describe_account_assignment_deletion_status.return_value = {
+            "AccountAssignmentDeletionStatus": {"Status": "SUCCEEDED"}
+        }
+
+        desired = [
+            handler.Binding(
+                account_id="123456789012",
+                permission_set_name="Admin",
+                permission_set_arn="arn:ps-desired",
+                groups=[handler.Group(name="desired", id="g-desired")],
+                template_name="t",
+            )
+        ]
+
+        with patch.object(handler, "sso_admin", mock_sso):
+            with patch.object(handler, "dynamodb", mock_dynamodb):
+                with patch.object(
+                    handler,
+                    "get_tracking_assignments",
+                    return_value=[tracked_assignment],
+                ):
+                    deleted, failures = handler.reconcile_assignments(
+                        instance_arn="arn:i",
+                        desired_bindings=desired,
+                        tracking_table_name="tracking",
+                        accounts_to_reconcile=["123456789012"],
+                    )
+
+        assert not failures
+        assert len(deleted) == 1
+        assert deleted[0]["assignment_id"] == "123456789012#g-extra#arn:ps-extra"
+
+    def test_does_not_delete_when_assignment_is_desired(self):
+        mock_sso = MagicMock()
+        paginator = MagicMock()
+        paginator.paginate.return_value = [
+            {
+                "AccountAssignments": [
+                    {
+                        "AccountId": "123456789012",
+                        "PermissionSetArn": "arn:ps-desired",
+                        "PrincipalId": "g-desired",
+                        "PrincipalType": "GROUP",
+                    }
+                ]
+            }
+        ]
+        mock_sso.get_paginator.return_value = paginator
+
+        desired = [
+            handler.Binding(
+                account_id="123456789012",
+                permission_set_name="Admin",
+                permission_set_arn="arn:ps-desired",
+                groups=[handler.Group(name="desired", id="g-desired")],
+                template_name="t",
+            )
+        ]
+
+        with patch.object(handler, "sso_admin", mock_sso):
+            with patch.object(handler, "get_tracking_assignments", return_value=[]):
+                deleted, failures = handler.reconcile_assignments(
+                    instance_arn="arn:i",
+                    desired_bindings=desired,
+                    tracking_table_name=None,
+                    accounts_to_reconcile=["123456789012"],
+                )
+
+        assert not deleted
+        assert not failures
+        mock_sso.delete_account_assignment.assert_not_called()
+
+    def test_skips_non_group_assignments(self):
+        mock_sso = MagicMock()
+        paginator = MagicMock()
+        paginator.paginate.return_value = [
+            {
+                "AccountAssignments": [
+                    {
+                        "AccountId": "123456789012",
+                        "PermissionSetArn": "arn:ps-user",
+                        "PrincipalId": "u-1",
+                        "PrincipalType": "USER",
+                    }
+                ]
+            }
+        ]
+        mock_sso.get_paginator.return_value = paginator
+
+        with patch.object(handler, "sso_admin", mock_sso):
+            with patch.object(handler, "get_tracking_assignments", return_value=[]):
+                deleted, failures = handler.reconcile_assignments(
+                    instance_arn="arn:i",
+                    desired_bindings=[],
+                    tracking_table_name=None,
+                    accounts_to_reconcile=["123456789012"],
+                )
+
+        assert not deleted
+        assert not failures
+        mock_sso.delete_account_assignment.assert_not_called()
+
+    def test_records_failure_when_deletion_raises(self):
+        mock_sso = MagicMock()
+
+        # Create a tracked assignment that will be deleted (with no matching desired binding)
+        tracked_assignment = handler.TrackedAssignment(
+            assignment_id="123456789012#g-extra#arn:ps-extra",
+            account_id="123456789012",
+            permission_set_arn="arn:ps-extra",
+            permission_set_name="Extra",
+            principal_id="g-extra",
+            principal_type="GROUP",
+            template_name="t",
+            group_name="extra",
+            created_at="2025-01-01T00:00:00Z",
+            last_seen="2025-01-01T00:00:00Z",
+        )
+
+        mock_sso.delete_account_assignment.side_effect = handler.HandlerError("boom")
+
+        with patch.object(handler, "sso_admin", mock_sso):
+            with patch.object(
+                handler, "get_tracking_assignments", return_value=[tracked_assignment]
+            ):
+                with patch.object(handler, "delete_tracking_assignment"):
+                    deleted, failures = handler.reconcile_assignments(
+                        instance_arn="arn:i",
+                        desired_bindings=[],
+                        tracking_table_name=None,
+                        accounts_to_reconcile=["123456789012"],
+                    )
+
+        assert not deleted
+        assert len(failures) == 1
+        assert failures[0]["assignment_id"] == "123456789012#g-extra#arn:ps-extra"

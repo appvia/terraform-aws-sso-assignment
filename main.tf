@@ -2,11 +2,25 @@
 resource "aws_dynamodb_table" "config" {
   billing_mode = var.dynamodb_billing_mode
   hash_key     = "group_name"
-  name         = var.name
+  name         = format("%s-config", var.name)
   tags         = local.tags
 
   attribute {
     name = "group_name"
+    type = "S"
+  }
+}
+
+## DynamoDB table for tracking managed SSO account assignments
+## Used to differentiate between assignments created by this module and external assignments
+resource "aws_dynamodb_table" "assignments_tracking" {
+  billing_mode = var.dynamodb_billing_mode
+  hash_key     = "assignment_id"
+  name         = format("%s-tracking", var.name)
+  tags         = local.tags
+
+  attribute {
+    name = "assignment_id"
     type = "S"
   }
 }
@@ -23,21 +37,23 @@ module "lambda" {
   description   = "Lambda function for SSO group assignment"
   handler       = "handler.lambda_handler"
   runtime       = var.lambda_runtime
-  # Exclude co-located pytest files from the deployment package.
+  timeout       = var.lambda_timeout
+  tags          = var.tags
+
   source_path = [
     {
-      path     = "${path.module}/assets/functions"
-      patterns = ["!test_.*\\.py"]
+      path = "${path.module}/assets/functions"
+      patterns = [
+        "!test_.*\\.py",
+      ]
     }
   ]
-  timeout = var.lambda_timeout
-  tags    = var.tags
 
   environment_variables = {
-    AWS_DEFAULT_REGION     = local.region
-    DYNAMODB_TABLE_NAME    = aws_dynamodb_table.config.name
-    SSO_ACCOUNT_TAG_PREFIX = var.sso_account_tag_prefix
-    SSO_INSTANCE_ARN       = var.sso_instance_arn
+    DYNAMODB_CONFIG_TABLE   = aws_dynamodb_table.config.name
+    DYNAMODB_TRACKING_TABLE = aws_dynamodb_table.assignments_tracking.name
+    SSO_ACCOUNT_TAG_PREFIX  = var.sso_account_tag_prefix
+    SSO_INSTANCE_ARN        = var.sso_instance_arn
   }
 
   ## Lambda Role
@@ -104,6 +120,22 @@ resource "aws_cloudwatch_event_rule" "account_creation" {
   })
 }
 
+## Provision an event to trigger the Lambda function when a tracking in the config table is updated
+resource "aws_cloudwatch_event_rule" "config_update" {
+  description = "Used to trigger the SSO assignment Lambda function when a tracking in the config table is updated"
+  name        = format("%s-config-update", var.name)
+  state       = "ENABLED"
+  tags        = local.tags
+
+  event_pattern = jsonencode({
+    source      = ["aws.dynamodb"]
+    detail-type = ["Table Update"]
+    detail = {
+      tableName = [aws_dynamodb_table.config.name]
+    }
+  })
+}
+
 ## Provision a EventBridge rule for the AWS Organizations account creation events
 resource "aws_cloudwatch_event_target" "account_creation_target" {
   arn      = aws_sfn_state_machine.main.arn
@@ -117,3 +149,4 @@ resource "aws_cloudwatch_event_target" "cron_schedule_target" {
   role_arn = aws_iam_role.eventbridge.arn
   rule     = aws_cloudwatch_event_rule.cron_schedule.name
 }
+
