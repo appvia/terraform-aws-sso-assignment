@@ -8,6 +8,16 @@ output "dynamodb_table_name" {
   value       = aws_dynamodb_table.config.name
 }
 
+output "assignments_tracking_table_arn" {
+  description = "ARN of the DynamoDB table tracking managed SSO assignments"
+  value       = aws_dynamodb_table.assignments_tracking.arn
+}
+
+output "assignments_tracking_table_name" {
+  description = "Name of the DynamoDB table tracking managed SSO assignments"
+  value       = aws_dynamodb_table.assignments_tracking.name
+}
+
 output "eventbridge_rule_arns" {
   description = "ARNs of EventBridge rules for account creation and cron schedule"
   value = {

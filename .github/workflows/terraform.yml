@@ -23,6 +23,38 @@ jobs:
     with:
       working-directory: .
 
+  lambda-lint:
+    runs-on: ubuntu-latest
+    name: Lambda Lint
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run Lambda Lint
+        run: make lint-python
+
+  lambda-format:
+    runs-on: ubuntu-latest
+    name: Lambda Format
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run Lambda Format
+        run: make format-python
+      - name: Check for changes
+        run: git diff --exit-code
+
   lambda-unit-tests:
     runs-on: ubuntu-latest
     name: Lambda Unit Tests

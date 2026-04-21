@@ -146,6 +146,11 @@ lint:
 	$(MAKE) lint-modules
 	$(MAKE) lint-examples
 	$(MAKE) lint-actions
+	$(MAKE) lint-python
+
+lint-python:
+	@echo "--> Running pylint"
+	@pylint assets/functions/*.py
 
 lint-modules:
 	@echo "--> Running tflint on modules"
@@ -169,8 +174,15 @@ lint-actions:
 	@actionlint .github/workflows/*.yml
 
 format:
-	@echo "--> Running terraform fmt"
+	$(MAKE) format-terraform
+	$(MAKE) format-python
+	
+format-terraform:
 	@terraform fmt -recursive -write=true
+
+format-python:
+	@echo "--> Running black"
+	@black assets/functions/*.py
 
 clean:
 	@echo "--> Cleaning up"

@@ -16,7 +16,7 @@ module "config" {
 ## Features
 
 - **Automated Configuration**: Converts group configuration maps into DynamoDB items
-- **Metadata Tracking**: Stores description and `updated_at` for each template
+- **Metadata Tracking**: Stores description for each template
 - **Flexible Schema**: Optional `enabled` per template
 - **Reusable**: Can be called independently to update configurations
 
@@ -47,7 +47,7 @@ groups_configuration = {
 
 - `group_name` (hash key): Template name (same as the Terraform map key)
 - `permission_sets`: String set of permission set names
-- `enabled`, `description`, `updated_at`
+- `enabled`, `description`
 
 <!-- BEGIN_TF_DOCS -->
 ## Providers

@@ -17,9 +17,6 @@ resource "aws_dynamodb_table_item" "group_configurations" {
     permission_sets = {
       SS = each.value.permission_sets
     }
-    updated_at = {
-      S = timestamp()
-    }
   })
   table_name = var.dynamodb_table_name
 }

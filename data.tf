@@ -1,6 +1,3 @@
-## Find the current AWS region
-data "aws_region" "current" {}
-
 ## Craft a IAM policy document for the Lambda function
 data "aws_iam_policy_document" "lambda_policy" {
   statement {
@@ -11,7 +8,23 @@ data "aws_iam_policy_document" "lambda_policy" {
       "dynamodb:Query",
       "dynamodb:Scan"
     ]
-    resources = [aws_dynamodb_table.config.arn]
+    resources = [
+      aws_dynamodb_table.config.arn,
+      aws_dynamodb_table.assignments_tracking.arn,
+    ]
+  }
+
+  statement {
+    sid    = "AllowModifyTrackingTable"
+    effect = "Allow"
+    actions = [
+      "dynamodb:DeleteItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+    ]
+    resources = [
+      aws_dynamodb_table.assignments_tracking.arn
+    ]
   }
 
   statement {
@@ -20,12 +33,16 @@ data "aws_iam_policy_document" "lambda_policy" {
     actions = [
       "identitystore:ListGroups",
       "sso:CreateAccountAssignment",
+      "sso:DeleteAccountAssignment",
       "sso:DescribeAccountAssignment",
+      "sso:DescribeAccountAssignmentCreationStatus",
+      "sso:DescribeAccountAssignmentDeletionStatus",
+      "sso:DescribePermissionSet",
+      "sso:ListAccountAssignments",
       "sso:ListInstances",
       "sso:ListPermissionSets",
-      "sso:DescribePermissionSet",
-      "sso:DescribeAccountAssignmentCreationStatus"
     ]
+    resources = ["*"]
   }
 
   statement {
@@ -61,5 +78,9 @@ data "aws_iam_policy_document" "eventbridge_assume_role" {
       type        = "Service"
       identifiers = ["events.amazonaws.com"]
     }
+    actions = [
+      "sts:AssumeRole"
+    ]
   }
 }
+
