@@ -12,7 +12,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-.PHONY: all security lint format documentation documentation-examples validate-all validate validate-examples init examples tests python-tests python-test
+.PHONY: all security lint format documentation documentation-examples validate-all validate validate-examples init examples tests python-tests python-test python-coverage-handler
 
 default: all
 
@@ -109,6 +109,18 @@ python-tests:
 	@.venv/bin/python -m pytest -v assets/functions
 
 python-test: python-tests
+
+python-coverage-handler:
+	@echo "--> Running Python coverage (assets/functions/handler.py)"
+	@command -v python3 >/dev/null 2>&1 || { echo "python3 is not installed"; exit 1; }
+	@test -d .venv || python3 -m venv .venv
+	@.venv/bin/python -m pip install -q -r requirements-dev.txt pytest-cov
+	@mkdir -p coverage/handler
+	@cd assets/functions && ../../.venv/bin/python -m pytest -v test_handler.py \
+		--cov=handler \
+		--cov-report=term-missing \
+		--cov-report=html:../../coverage/handler/html \
+		--cov-report=xml:../../coverage/handler/coverage.xml
 
 validate:
 	@echo "--> Running terraform validate"

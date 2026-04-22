@@ -50,7 +50,9 @@ data "aws_iam_policy_document" "lambda_policy" {
     effect = "Allow"
     actions = [
       "organizations:DescribeAccount",
+      "organizations:DescribeOrganizationalUnit",
       "organizations:ListAccounts",
+      "organizations:ListParents",
       "organizations:ListTagsForResource"
     ]
     resources = ["*"]
