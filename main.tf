@@ -45,6 +45,7 @@ module "lambda" {
       path = "${path.module}/assets/functions"
       patterns = [
         "!test_.*\\.py",
+        "!__pycache__",
       ]
     }
   ]

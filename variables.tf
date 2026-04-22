@@ -79,7 +79,7 @@ variable "lambda_timeout" {
 variable "name" {
   description = "Name for all resources i.e. handler, lambda, step function, event bridge, etc."
   type        = string
-  default     = "lz-sso-assignment"
+  default     = "lz-sso"
 
   validation {
     condition     = length(var.name) > 0
@@ -96,7 +96,7 @@ variable "sns_topic_arn" {
 variable "sso_account_tag_prefix" {
   description = "Account tag key prefix for permission-set templates. Keys are {prefix}/{template_name} (e.g. sso/default) — see module README"
   type        = string
-  default     = "Grants"
+  default     = "Grant"
 
   validation {
     condition     = length(var.sso_account_tag_prefix) > 0 && !strcontains(var.sso_account_tag_prefix, "/")
