@@ -19,6 +19,10 @@ from typing import Any, Optional, Tuple
 import boto3
 from botocore.exceptions import ClientError
 
+# Optional SNS topic for assignment lifecycle events (created/deleted). This is separate from
+# the Step Functions failure notification topic.
+_ASSIGNMENT_EVENTS_SNS_TOPIC_ARN = os.environ.get("ASSIGNMENT_EVENTS_SNS_TOPIC_ARN")
+
 # Lambda sets AWS_REGION; unit tests and other import contexts may not — botocore requires a region.
 _AWS_REGION = (
     os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
@@ -32,6 +36,72 @@ logger.setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
 
 class HandlerError(RuntimeError):
     """Raised for expected handler failures that should mark the workflow failed."""
+
+
+@dataclass
+class SnsEvent:
+    """
+    Generic SNS event envelope.
+
+    The SNS topic is expected to exist already. This module only *publishes*.
+    """
+
+    event_type: str
+    timestamp: str
+    detail: dict[str, Any] = field(default_factory=dict)
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), default=str)
+
+
+class AssignmentEvents:
+    """Small publisher for assignment lifecycle SNS events."""
+
+    def __init__(self, topic_arn: Optional[str]):
+        self.topic_arn = topic_arn
+        self._client = None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.topic_arn)
+
+    def _sns(self):
+        if self._client is None:
+            self._client = boto3.client("sns", region_name=_AWS_REGION)
+        return self._client
+
+    def publish(self, event_type: str, detail: dict[str, Any]) -> None:
+        if not self.topic_arn:
+            return
+
+        evt = SnsEvent(
+            event_type=event_type,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            detail=detail,
+        )
+
+        try:
+            self._sns().publish(
+                TopicArn=self.topic_arn,
+                Message=evt.to_json(),
+                MessageAttributes={
+                    "event_type": {"DataType": "String", "StringValue": event_type}
+                },
+            )
+        except ClientError as e:
+            # Publishing events should not break the assignment workflow.
+            logger.warning(
+                "Failed to publish assignment event to SNS",
+                extra={
+                    "action": "assignment_event_publish",
+                    "event_type": event_type,
+                    "topic_arn": self.topic_arn,
+                    "error": str(e),
+                },
+            )
+
+
+assignment_events = AssignmentEvents(_ASSIGNMENT_EVENTS_SNS_TOPIC_ARN)
 
 
 class _JSONFormatter(logging.Formatter):
@@ -1638,6 +1708,22 @@ def reconcile_creations(
                     principal_type="GROUP",
                     template_name=binding.template_name,
                 )
+                assignment_events.publish(
+                    event_type="AccountAssignmentCreated",
+                    detail={
+                        "account_id": binding.account_id,
+                        "assignment_id": tracking.get_assignment_id(
+                            binding.account_id, group.id, binding.permission_set_arn
+                        ),
+                        "group": {"id": group.id, "name": group.name},
+                        "permission_set": {
+                            "arn": binding.permission_set_arn,
+                            "name": binding.permission_set_name,
+                        },
+                        "principal_type": "GROUP",
+                        "template_name": binding.template_name,
+                    },
+                )
                 # Add the success to the list
                 successes.append(
                     {
@@ -1746,6 +1832,23 @@ def reconcile_deletions(
                         permission_set_name=assignment.permission_set_name,
                         principal_id=assignment.principal_id,
                         principal_type=assignment.principal_type,
+                    )
+                    assignment_events.publish(
+                        event_type="AccountAssignmentDeleted",
+                        detail={
+                            "account_id": assignment.account_id,
+                            "assignment_id": assignment.assignment_id,
+                            "group": {
+                                "id": assignment.principal_id,
+                                "name": assignment.group_name,
+                            },
+                            "permission_set": {
+                                "arn": assignment.permission_set_arn,
+                                "name": assignment.permission_set_name,
+                            },
+                            "principal_type": assignment.principal_type,
+                            "template_name": assignment.template_name,
+                        },
                     )
                     successful_deletions.append(
                         {

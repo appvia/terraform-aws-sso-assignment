@@ -99,6 +99,12 @@ variable "sns_topic_arn" {
   default     = null
 }
 
+variable "assignment_events_sns_topic_arn" {
+  description = "Optional ARN of an existing SNS topic to publish assignment creation/deletion events from the Lambda (if null, event publishing disabled). This topic is NOT created by this module."
+  type        = string
+  default     = null
+}
+
 variable "sso_account_tag_prefix" {
   description = "Account tag key prefix for permission-set templates. Keys are {prefix}/{template_name} (e.g. sso/default) — see module README"
   type        = string

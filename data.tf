@@ -14,6 +14,18 @@ data "aws_iam_policy_document" "lambda_policy" {
     ]
   }
 
+  dynamic "statement" {
+    for_each = var.events_sns_topic_arn != null ? [1] : []
+    content {
+      sid    = "AllowPublishAssignmentEventsToSNS"
+      effect = "Allow"
+      actions = [
+        "sns:Publish"
+      ]
+      resources = [var.events_sns_topic_arn]
+    }
+  }
+
   statement {
     sid    = "AllowIdentityStore"
     effect = "Allow"

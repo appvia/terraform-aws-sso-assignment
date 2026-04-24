@@ -54,6 +54,42 @@ class TestJSONFormatter:
         assert data["custom_field"] == "extra"
 
 
+class TestSnsEvent:
+    def test_to_json_contains_type_timestamp_and_detail(self):
+        evt = handler.SnsEvent(
+            event_type="AccountAssignmentCreated",
+            timestamp="2026-01-01T00:00:00+00:00",
+            detail={"k": "v"},
+        )
+        assert json.loads(evt.to_json()) == {
+            "event_type": "AccountAssignmentCreated",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "detail": {"k": "v"},
+        }
+
+
+class TestAssignmentEvents:
+    def test_publish_is_noop_when_topic_unset(self):
+        pub = handler.AssignmentEvents(None)
+        with patch.object(handler.boto3, "client") as bc:
+            pub.publish("AccountAssignmentCreated", {"x": 1})
+            bc.assert_not_called()
+
+    def test_publish_calls_sns_publish_with_envelope(self):
+        fake_sns = MagicMock()
+        with patch.object(handler.boto3, "client", return_value=fake_sns):
+            pub = handler.AssignmentEvents("arn:aws:sns:eu-west-1:123:topic")
+            pub.publish("AccountAssignmentCreated", {"x": 1})
+
+        fake_sns.publish.assert_called_once()
+        kwargs = fake_sns.publish.call_args.kwargs
+        assert kwargs["TopicArn"] == "arn:aws:sns:eu-west-1:123:topic"
+        body = json.loads(kwargs["Message"])
+        assert body["event_type"] == "AccountAssignmentCreated"
+        assert body["detail"] == {"x": 1}
+        assert "timestamp" in body
+
+
 class TestGroup:
     def test_to_json(self):
         g = handler.Group(name="TeamA", id="g-1")
@@ -862,6 +898,31 @@ class TestReconcileCreations:
         assert [f["group_name"] for f in failures] == ["A"]
         tracking.create.assert_called_once()
 
+    def test_publishes_creation_event_when_enabled(self):
+        identity_center = MagicMock()
+        tracking = MagicMock()
+        tracking.get_assignment_id.return_value = "123#g-2#arn:ps"
+
+        bindings = [
+            handler.Binding(
+                account_id="123",
+                permission_set_name="Admin",
+                permission_set_arn="arn:ps",
+                groups=[handler.Group(name="B", id="g-2")],
+                template_name="tpl",
+            )
+        ]
+
+        with patch.object(handler, "assignment_events") as pub:
+            handler.reconcile_creations(
+                bindings, identity_center=identity_center, tracking=tracking
+            )
+
+        pub.publish.assert_called_once()
+        args, kwargs = pub.publish.call_args
+        assert kwargs["event_type"] == "AccountAssignmentCreated"
+        assert kwargs["detail"]["account_id"] == "123"
+
 
 class TestReconcileDeletions:
     def test_returns_empty_when_no_tracked_assignments(self):
@@ -920,6 +981,32 @@ class TestReconcileDeletions:
         assert [d["assignment_id"] for d in deleted] == ["1#p1#arn"]
         identity_center.delete_assignment.assert_called_once()
         tracking.delete.assert_called_once_with("1#p1#arn")
+
+    def test_publishes_deletion_event_when_enabled(self):
+        tracking = MagicMock()
+        identity_center = MagicMock()
+
+        a1 = handler.Assignment(
+            assignment_id="1#p1#arn",
+            account_id="1",
+            permission_set_arn="arn",
+            permission_set_name="Admin",
+            principal_id="p1",
+            principal_type="GROUP",
+            template_name="t",
+            group_name="G1",
+        )
+        tracking.list.return_value = [a1]
+
+        with patch.object(handler, "assignment_events") as pub:
+            handler.reconcile_deletions(
+                desired_bindings=[], tracking=tracking, identity_center=identity_center
+            )
+
+        pub.publish.assert_called_once()
+        args, kwargs = pub.publish.call_args
+        assert kwargs["event_type"] == "AccountAssignmentDeleted"
+        assert kwargs["detail"]["assignment_id"] == "1#p1#arn"
 
     def test_ignores_assignment_missing_in_aws_but_still_deletes_tracking(self):
         tracking = MagicMock()

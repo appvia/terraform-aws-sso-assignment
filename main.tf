@@ -61,10 +61,11 @@ module "lambda" {
   ]
 
   environment_variables = {
-    DYNAMODB_CONFIG_TABLE   = aws_dynamodb_table.config.name
-    DYNAMODB_TRACKING_TABLE = aws_dynamodb_table.assignments_tracking.name
-    SSO_ACCOUNT_TAG_PREFIX  = var.sso_account_tag_prefix
-    SSO_INSTANCE_ARN        = var.sso_instance_arn
+    ASSIGNMENT_EVENTS_SNS_TOPIC_ARN = var.events_sns_topic_arn
+    DYNAMODB_CONFIG_TABLE           = aws_dynamodb_table.config.name
+    DYNAMODB_TRACKING_TABLE         = aws_dynamodb_table.assignments_tracking.name
+    SSO_ACCOUNT_TAG_PREFIX          = var.sso_account_tag_prefix
+    SSO_INSTANCE_ARN                = var.sso_instance_arn
   }
 
   ## Lambda Role
@@ -187,8 +188,8 @@ resource "aws_pipes_pipe" "config_update" {
 
   source_parameters {
     dynamodb_stream_parameters {
-      starting_position = "LATEST"
-      batch_size        = 1
+      starting_position                  = "LATEST"
+      batch_size                         = 1
       maximum_record_age_in_seconds      = -1
       maximum_batching_window_in_seconds = 0
     }
