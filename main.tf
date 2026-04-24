@@ -149,6 +149,17 @@ resource "aws_cloudwatch_event_rule" "account_creation" {
   })
 }
 
+## CloudWatch Log Group for EventBridge Pipes logging
+resource "aws_cloudwatch_log_group" "eventbridge_pipes_config_update" {
+  count = var.enable_config_triggers ? 1 : 0
+
+  name              = format("/aws/pipes/%s-config-update", var.name)
+  retention_in_days = var.cloudwatch_logs_retention_in_days
+  kms_key_id        = var.cloudwatch_logs_kms_key_id
+  log_group_class   = var.cloudwatch_logs_log_group_class
+  tags              = local.tags
+}
+
 ## Provision an event to trigger the Lambda function when a tracking in the config table is updated
 ## Using EventBridge Pipes for reliable DynamoDB stream-based triggering
 resource "aws_pipes_pipe" "config_update" {
@@ -161,12 +172,23 @@ resource "aws_pipes_pipe" "config_update" {
   target      = aws_sfn_state_machine.main.arn
   tags        = local.tags
 
+  # CloudWatch Logs configuration
+  dynamic "log_configuration" {
+    for_each = var.enable_config_triggers ? [1] : []
+
+    content {
+      level = "INFO"
+      cloudwatch_logs_log_destination {
+        # This is the CloudWatch Log Group for EventBridge Pipes logging
+        log_group_arn = aws_cloudwatch_log_group.eventbridge_pipes_config_update[0].arn
+      }
+    }
+  }
+
   source_parameters {
     dynamodb_stream_parameters {
       starting_position = "LATEST"
       batch_size        = 1
-      # Explicitly set these to avoid provider/default update bugs and satisfy
-      # AWS validation constraints.
       maximum_record_age_in_seconds      = -1
       maximum_batching_window_in_seconds = 0
     }
@@ -199,4 +221,3 @@ resource "aws_cloudwatch_event_target" "cron_schedule_target" {
   role_arn = aws_iam_role.eventbridge.arn
   rule     = aws_cloudwatch_event_rule.cron_schedule.name
 }
-
