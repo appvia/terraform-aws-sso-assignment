@@ -1,5 +1,8 @@
 """
-Unit tests for handler.py — AWS SSO assignment Lambda logic.
+Class-focused unit tests for handler.py.
+
+These tests intentionally avoid the end-to-end Lambda workflow for now and
+instead validate each class in isolation using mocks (no AWS calls).
 """
 
 from __future__ import annotations
@@ -8,14 +11,12 @@ import json
 import logging
 import os
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest  # pylint: disable=import-error
 from botocore.exceptions import ClientError
 
-# Prevent boto3/botocore from attempting to resolve credentials via local
-# credential_process helpers during import (e.g. `granted`), which is not
-# available/allowed in some test environments.
+# Prevent boto3/botocore from attempting to resolve credentials during import.
 os.environ.setdefault("AWS_ACCESS_KEY_ID", "test")
 os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "test")
 os.environ.setdefault("AWS_SESSION_TOKEN", "test")
@@ -27,554 +28,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import handler  # noqa: E402 pylint: disable=wrong-import-position
 
 
-@pytest.fixture(autouse=True)
-def restore_env():
-    """Snapshot env vars touched by tests and restore after each test."""
-    keys = (
-        "DYNAMODB_TRACKING_TABLE",
-        "DYNAMODB_CONFIG_TABLE",
-        "SSO_INSTANCE_ARN",
-        "SSO_ACCOUNT_TAG_PREFIX",
-        "LOG_LEVEL",
-    )
-    before = {k: os.environ.get(k) for k in keys}
-    yield
-    for k in keys:
-        v = before[k]
-        if v is None:
-            os.environ.pop(k, None)
-        else:
-            os.environ[k] = v
-
-
-class TestConfigurationModel:
-    def test_groups_map_contains_templates(self):
-        cfg = handler.Configuration(
-            groups={"tpl": handler.GroupConfiguration(permission_sets=["Admin"])}
-        )
-        assert "tpl" in cfg.groups
-        assert cfg.groups["tpl"].permission_sets == ["Admin"]
-
-
-class TestPermissionAndBindingModels:
-    def test_permission_holds_template_key_and_groups(self):
-        p = handler.Permission(name="sso/x", groups=[" a ", "b"])
-        assert p.name == "sso/x"
-        assert p.groups == [" a ", "b"]
-
-    def test_binding_holds_groups(self):
-        b = handler.Binding(
-            account_id="123456789012",
-            permission_set_name="PS",
-            permission_set_arn="arn:ps",
-            groups=[handler.Group(name="G", id="id-1")],
-        )
-        assert b.account_id == "123456789012"
-        assert b.groups[0].id == "id-1"
-
-
-class TestDataclassToJson:
-    def test_group_and_permission_json_roundtrip(self):
-        g = handler.Group(name="G", id="gid")
-        data = json.loads(g.to_json())
-        assert data == {"name": "G", "id": "gid"}
-
-        p = handler.Permission(name="sso/t", groups=["A"])
-        assert json.loads(p.to_json()) == {"name": "sso/t", "groups": ["A"]}
-
-    def test_binding_nested_groups_serialize(self):
-        b = handler.Binding(
-            account_id="123456789012",
-            permission_set_name="PS",
-            permission_set_arn="arn:ps",
-            groups=[handler.Group(name="G", id="gid")],
-        )
-        data = json.loads(b.to_json())
-        assert data["account_id"] == "123456789012"
-        assert data["groups"] == [{"name": "G", "id": "gid"}]
-
-    def test_configuration_nested_json(self):
-        cfg = handler.Configuration(
-            groups={
-                "x": handler.GroupConfiguration(permission_sets=["P"], description="d")
-            }
-        )
-        data = json.loads(cfg.to_json())
-        assert data["groups"]["x"]["permission_sets"] == ["P"]
-        assert data["groups"]["x"]["description"] == "d"
-
-
 class TestHandlerError:
     def test_is_runtime_error(self):
-        err = handler.HandlerError("x")
+        err = handler.HandlerError("boom")
         assert isinstance(err, RuntimeError)
-        assert str(err) == "x"
-
-
-class TestGetIdentityStoreId:
-    def test_returns_matching_identity_store_id(self):
-        mock_sso = MagicMock()
-        paginator = MagicMock()
-        mock_sso.get_paginator.return_value = paginator
-        paginator.paginate.return_value = [
-            {
-                "Instances": [
-                    {
-                        "InstanceArn": "arn:aws:sso:::instance/other",
-                        "IdentityStoreId": "d-WRONG",
-                    },
-                    {
-                        "InstanceArn": "arn:aws:sso:::instance/want",
-                        "IdentityStoreId": "d-12345",
-                    },
-                ]
-            }
-        ]
-        with patch.object(handler, "sso_admin", mock_sso):
-            assert (
-                handler.get_identity_store_id("arn:aws:sso:::instance/want")
-                == "d-12345"
-            )
-
-    def test_raises_when_not_found(self):
-        mock_sso = MagicMock()
-        paginator = MagicMock()
-        mock_sso.get_paginator.return_value = paginator
-        paginator.paginate.return_value = [{"Instances": []}]
-        with patch.object(handler, "sso_admin", mock_sso):
-            with pytest.raises(handler.HandlerError, match="not found"):
-                handler.get_identity_store_id("arn:aws:sso:::instance/nope")
-
-    def test_finds_instance_across_paginated_pages(self):
-        mock_sso = MagicMock()
-        paginator = MagicMock()
-        mock_sso.get_paginator.return_value = paginator
-        paginator.paginate.return_value = [
-            {
-                "Instances": [
-                    {
-                        "InstanceArn": "arn:aws:sso:::instance/a",
-                        "IdentityStoreId": "d-A",
-                    }
-                ]
-            },
-            {
-                "Instances": [
-                    {
-                        "InstanceArn": "arn:aws:sso:::instance/want",
-                        "IdentityStoreId": "d-WANT",
-                    },
-                ]
-            },
-        ]
-        with patch.object(handler, "sso_admin", mock_sso):
-            assert (
-                handler.get_identity_store_id("arn:aws:sso:::instance/want") == "d-WANT"
-            )
-
-
-class TestGetPermissionSets:
-    def test_maps_names_to_arns(self):
-        mock_sso = MagicMock()
-        paginator = MagicMock()
-        mock_sso.get_paginator.return_value = paginator
-        paginator.paginate.return_value = [{"PermissionSets": ["arn:ps:1", "arn:ps:2"]}]
-        mock_sso.describe_permission_set.side_effect = [
-            {"PermissionSet": {"Name": "Admin", "PermissionSetArn": "arn:ps:1"}},
-            {"PermissionSet": {"Name": "ReadOnly", "PermissionSetArn": "arn:ps:2"}},
-        ]
-        with patch.object(handler, "sso_admin", mock_sso):
-            result = handler.get_permission_sets("arn:aws:sso:::instance/x")
-        assert result == {"Admin": "arn:ps:1", "ReadOnly": "arn:ps:2"}
-
-
-class TestGetIdentityStoreGroups:
-    def test_maps_display_names_to_ids(self):
-        mock_ids = MagicMock()
-        paginator = MagicMock()
-        mock_ids.get_paginator.return_value = paginator
-        paginator.paginate.return_value = [
-            {
-                "Groups": [
-                    {"DisplayName": "TeamA", "GroupId": "g-1"},
-                    {"DisplayName": None, "GroupId": "g-orphan"},
-                    {"DisplayName": "TeamB", "GroupId": "g-2"},
-                ]
-            }
-        ]
-        with patch.object(handler, "identitystore", mock_ids):
-            out = handler.get_identity_store_groups("d-abc")
-        assert out == {"TeamA": "g-1", "TeamB": "g-2"}
-
-    def test_merges_groups_across_pages(self):
-        mock_ids = MagicMock()
-        paginator = MagicMock()
-        mock_ids.get_paginator.return_value = paginator
-        paginator.paginate.return_value = [
-            {"Groups": [{"DisplayName": "A", "GroupId": "g-a"}]},
-            {"Groups": [{"DisplayName": "B", "GroupId": "g-b"}]},
-        ]
-        with patch.object(handler, "identitystore", mock_ids):
-            out = handler.get_identity_store_groups("d-abc")
-        assert out == {"A": "g-a", "B": "g-b"}
-
-
-class TestListActiveAccounts:
-    def test_only_active_ids(self):
-        mock_org = MagicMock()
-        paginator = MagicMock()
-        mock_org.get_paginator.return_value = paginator
-        paginator.paginate.return_value = [
-            {
-                "Accounts": [
-                    {"Id": "111111111111", "Status": "ACTIVE"},
-                    {"Id": "222222222222", "Status": "SUSPENDED"},
-                    {"Id": "333333333333", "Status": "ACTIVE"},
-                ]
-            }
-        ]
-        with patch.object(handler, "organizations", mock_org):
-            assert handler.list_active_accounts() == ["111111111111", "333333333333"]
-
-    def test_concatenates_accounts_across_pages(self):
-        mock_org = MagicMock()
-        paginator = MagicMock()
-        mock_org.get_paginator.return_value = paginator
-        paginator.paginate.return_value = [
-            {"Accounts": [{"Id": "111111111111", "Status": "ACTIVE"}]},
-            {"Accounts": [{"Id": "222222222222", "Status": "ACTIVE"}]},
-        ]
-        with patch.object(handler, "organizations", mock_org):
-            assert handler.list_active_accounts() == ["111111111111", "222222222222"]
-
-
-class TestGetAccountTags:
-    def test_returns_key_value_map(self):
-        mock_org = MagicMock()
-        mock_org.list_tags_for_resource.return_value = {
-            "Tags": [
-                {"Key": "sso/default", "Value": "g1,g2"},
-                {"Key": "other", "Value": "x"},
-            ]
-        }
-        with patch.object(handler, "organizations", mock_org):
-            tags = handler.get_account_tags("123456789012")
-        assert tags == {"sso/default": "g1,g2", "other": "x"}
-        mock_org.list_tags_for_resource.assert_called_once_with(
-            ResourceId="123456789012"
-        )
-
-    def test_raises_handler_error_on_client_error(self):
-        mock_org = MagicMock()
-        mock_org.list_tags_for_resource.side_effect = ClientError(
-            {"Error": {"Code": "AccessDenied", "Message": "nope"}},
-            "ListTagsForResource",
-        )
-        with patch.object(handler, "organizations", mock_org):
-            with pytest.raises(handler.HandlerError, match="Could not list tags"):
-                handler.get_account_tags("123456789012")
-
-
-class TestEnsureAccountExists:
-    def test_ok_when_describe_succeeds(self):
-        mock_org = MagicMock()
-        with patch.object(handler, "organizations", mock_org):
-            handler.ensure_account_exists("123456789012")
-        mock_org.describe_account.assert_called_once_with(AccountId="123456789012")
-
-    def test_raises_handler_error_on_client_error(self):
-        mock_org = MagicMock()
-        mock_org.describe_account.side_effect = ClientError(
-            {"Error": {"Code": "AccountNotFound", "Message": "missing"}},
-            "DescribeAccount",
-        )
-        with patch.object(handler, "organizations", mock_org):
-            with pytest.raises(handler.HandlerError, match="not found"):
-                handler.ensure_account_exists("999999999999")
-
-
-class TestGetAccountPermissionTags:
-    def test_builds_permissions_from_prefixed_tags(self):
-        tags = {
-            "sso/default": " Alpha , Beta ",
-            "sso/other": "Gamma",
-            "unrelated": "x",
-        }
-        perms = handler.get_account_permission_tags(tags, "sso")
-        by_name = {p.name: p.groups for p in perms}
-        assert by_name["default"] == ["Alpha", "Beta"]
-        assert by_name["other"] == ["Gamma"]
-        assert len(perms) == 2
-
-    def test_empty_when_no_matching_prefix(self):
-        assert not handler.get_account_permission_tags({"a": "b"}, "sso")
-
-
-class TestLoadConfiguration:
-    def test_scan_pagination_and_fields(self):
-        mock_table = MagicMock()
-        mock_table.scan.side_effect = [
-            {
-                "Items": [
-                    {
-                        "group_name": "a",
-                        "permission_sets": ["P1"],
-                        "enabled": False,
-                        "description": "d1",
-                    }
-                ],
-                "LastEvaluatedKey": {"group_name": "a"},
-            },
-            {
-                "Items": [
-                    {"group_name": "b"},
-                ],
-            },
-        ]
-        mock_resource = MagicMock()
-        mock_resource.Table.return_value = mock_table
-        with patch.object(handler, "dynamodb", mock_resource):
-            cfg = handler.load_configuration("my-table")
-        mock_resource.Table.assert_called_once_with("my-table")
-        assert set(cfg.groups) == {"a", "b"}
-        assert cfg.groups["a"].permission_sets == ["P1"]
-        assert cfg.groups["a"].enabled is False
-        assert cfg.groups["a"].description == "d1"
-        assert cfg.groups["b"].permission_sets == []
-        assert cfg.groups["b"].enabled is True
-
-
-class TestGetBindings:
-    def test_builds_bindings_for_resolved_groups_and_permission_sets(self):
-        req = handler.Permission(name="sso/tpl", groups=["G1", "G2"])
-        template = handler.GroupConfiguration(permission_sets=["Admin", "ReadOnly"])
-        bindings, successes, failures = handler.get_bindings(
-            account_id="123456789012",
-            identity_store_groups={"G1": "id-1", "G2": "id-2"},
-            permission_sets={"Admin": "arn:a", "ReadOnly": "arn:r"},
-            request=req,
-            template=template,
-        )
-        assert not successes and not failures
-        assert len(bindings) == 2
-        assert {b.permission_set_name for b in bindings} == {"Admin", "ReadOnly"}
-        assert all(b.account_id == "123456789012" for b in bindings)
-        assert len(bindings[0].groups) == 2
-        assert {g.name for g in bindings[0].groups} == {"G1", "G2"}
-
-    def test_unknown_group_appends_failure_and_omits_group(self):
-        req = handler.Permission(name="sso/tpl", groups=["Missing", "G2"])
-        template = handler.GroupConfiguration(permission_sets=["Admin"])
-        bindings, successes, failures = handler.get_bindings(
-            account_id="123456789012",
-            identity_store_groups={"G2": "id-2"},
-            permission_sets={"Admin": "arn:a"},
-            request=req,
-            template=template,
-        )
-        assert not successes
-        assert len(failures) == 1
-        assert failures[0]["group"] == "Missing"
-        assert len(bindings) == 1
-        assert len(bindings[0].groups) == 1
-        assert bindings[0].groups[0].name == "G2"
-
-    def test_unknown_permission_set_appends_failure(self):
-        req = handler.Permission(name="sso/tpl", groups=["G1"])
-        template = handler.GroupConfiguration(permission_sets=["Nope"])
-        bindings, _successes, failures = handler.get_bindings(
-            account_id="123456789012",
-            identity_store_groups={"G1": "id-1"},
-            permission_sets={"Admin": "arn:a"},
-            request=req,
-            template=template,
-        )
-        assert not bindings
-        assert len(failures) == 1
-        assert failures[0]["permission"] == "Nope"
-
-
-class TestGetPermissionSetsEdgeCases:
-    def test_skips_permission_sets_without_a_name(self):
-        mock_sso = MagicMock()
-        paginator = MagicMock()
-        mock_sso.get_paginator.return_value = paginator
-        paginator.paginate.return_value = [{"PermissionSets": ["arn:ps:1"]}]
-        mock_sso.describe_permission_set.return_value = {
-            "PermissionSet": {"Name": None}
-        }
-        with patch.object(handler, "sso_admin", mock_sso):
-            result = handler.get_permission_sets("arn:aws:sso:::instance/x")
-        assert not result
-
-
-class TestCreateAccountAssignment:
-    """``list_account_assignments`` must be stubbed: a bare MagicMock is truthy and would always skip create."""
-
-    @staticmethod
-    def _no_existing_assignments(mock_sso: MagicMock) -> None:
-        mock_sso.list_account_assignments.return_value = {"AccountAssignments": []}
-
-    def test_returns_when_status_succeeded(self):
-        mock_sso = MagicMock()
-        self._no_existing_assignments(mock_sso)
-        mock_sso.create_account_assignment.return_value = {
-            "AccountAssignmentCreationStatus": {"RequestId": "req-1"}
-        }
-        mock_sso.describe_account_assignment_creation_status.return_value = {
-            "AccountAssignmentCreationStatus": {"Status": "SUCCEEDED"}
-        }
-        with patch.object(handler, "sso_admin", mock_sso):
-            handler.create_account_assignment(
-                instance_arn="arn:i",
-                target_account_id="123456789012",
-                permission_set_arn="arn:ps",
-                permission_set_name="Admin",
-                principal_type="GROUP",
-                principal_id="g-1",
-                poll_timeout_seconds=5,
-                poll_interval_seconds=0.01,
-            )
-        mock_sso.list_account_assignments.assert_called_once_with(
-            InstanceArn="arn:i",
-            AccountId="123456789012",
-            PermissionSetArn="arn:ps",
-        )
-        mock_sso.create_account_assignment.assert_called_once()
-
-    def test_skips_create_when_assignment_already_listed(self):
-        mock_sso = MagicMock()
-        mock_sso.list_account_assignments.return_value = {
-            "AccountAssignments": [
-                {
-                    "AccountId": "123456789012",
-                    "PermissionSetArn": "arn:ps",
-                    "PrincipalId": "g-1",
-                    "PrincipalType": "GROUP",
-                }
-            ]
-        }
-        with patch.object(handler, "sso_admin", mock_sso):
-            handler.create_account_assignment(
-                instance_arn="arn:i",
-                target_account_id="123456789012",
-                permission_set_arn="arn:ps",
-                permission_set_name="Admin",
-                principal_type="GROUP",
-                principal_id="g-1",
-                poll_timeout_seconds=5,
-                poll_interval_seconds=0.01,
-            )
-        mock_sso.list_account_assignments.assert_called_once_with(
-            InstanceArn="arn:i",
-            AccountId="123456789012",
-            PermissionSetArn="arn:ps",
-        )
-        mock_sso.create_account_assignment.assert_not_called()
-        mock_sso.describe_account_assignment_creation_status.assert_not_called()
-
-    def test_raises_on_failed_status(self):
-        mock_sso = MagicMock()
-        self._no_existing_assignments(mock_sso)
-        mock_sso.create_account_assignment.return_value = {
-            "AccountAssignmentCreationStatus": {"RequestId": "req-1"}
-        }
-        mock_sso.describe_account_assignment_creation_status.return_value = {
-            "AccountAssignmentCreationStatus": {
-                "Status": "FAILED",
-                "FailureReason": "boom",
-            }
-        }
-        with patch.object(handler, "sso_admin", mock_sso):
-            with pytest.raises(handler.HandlerError, match="boom"):
-                handler.create_account_assignment(
-                    instance_arn="arn:i",
-                    target_account_id="123456789012",
-                    permission_set_arn="arn:ps",
-                    permission_set_name="Admin",
-                    principal_type="GROUP",
-                    principal_id="g-1",
-                    poll_timeout_seconds=5,
-                    poll_interval_seconds=0.01,
-                )
-
-    def test_raises_on_timeout(self):
-        mock_sso = MagicMock()
-        self._no_existing_assignments(mock_sso)
-        mock_sso.create_account_assignment.return_value = {
-            "AccountAssignmentCreationStatus": {"RequestId": "req-1"}
-        }
-        mock_sso.describe_account_assignment_creation_status.return_value = {
-            "AccountAssignmentCreationStatus": {"Status": "IN_PROGRESS"}
-        }
-        with patch.object(handler, "sso_admin", mock_sso):
-            with patch("handler.time.time", side_effect=[0, 100]):
-                with patch("handler.time.sleep"):
-                    with pytest.raises(handler.HandlerError, match="Timed out"):
-                        handler.create_account_assignment(
-                            instance_arn="arn:i",
-                            target_account_id="123456789012",
-                            permission_set_arn="arn:ps",
-                            permission_set_name="Admin",
-                            principal_type="GROUP",
-                            principal_id="g-1",
-                            poll_timeout_seconds=1,
-                            poll_interval_seconds=0.01,
-                        )
-
-
-class TestAssignPermissions:
-    def test_empty_bindings(self, caplog):
-        caplog.set_level(logging.WARNING)
-        ok, bad = handler.assign_permissions([], "arn:i")
-        assert not ok and not bad
-
-    def test_records_successes_and_failures(self):
-        calls = {"n": 0}
-
-        def fake_create(**_kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise handler.HandlerError("first fails")
-
-        bindings = [
-            handler.Binding(
-                account_id="123456789012",
-                permission_set_name="PS",
-                permission_set_arn="arn:ps",
-                groups=[
-                    handler.Group(name="G1", id="id-1"),
-                    handler.Group(name="G2", id="id-2"),
-                ],
-            )
-        ]
-        with patch.object(
-            handler, "create_account_assignment", side_effect=fake_create
-        ):
-            successes, failures = handler.assign_permissions(bindings, "arn:i")
-        assert len(successes) == 1
-        assert successes[0]["group_name"] == "G2"
-        assert len(failures) == 1
-        assert "first fails" in failures[0]["error"]
-
-
-class TestValidateEnvironment:
-    def test_raises_when_missing(self):
-        os.environ.pop("DYNAMODB_CONFIG_TABLE", None)
-        os.environ.pop("SSO_INSTANCE_ARN", None)
-        os.environ.pop("DYNAMODB_TRACKING_TABLE", None)
-        with pytest.raises(handler.HandlerError, match="DYNAMODB_CONFIG_TABLE"):
-            handler.validate_environment()
-
-    def test_ok_when_set(self):
-        os.environ["DYNAMODB_CONFIG_TABLE"] = "t"
-        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
-        os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
-        handler.validate_environment()
+        assert str(err) == "boom"
 
 
 class TestJSONFormatter:
-    def test_format_emits_json_with_message(self):
+    def test_format_emits_json_with_message_level_and_extras(self):
         fmt = handler._JSONFormatter()
         record = logging.LogRecord(
             name="test",
@@ -586,711 +48,1503 @@ class TestJSONFormatter:
             exc_info=None,
         )
         record.custom_field = "extra"
-        line = fmt.format(record)
-        data = json.loads(line)
+        data = json.loads(fmt.format(record))
         assert data["message"] == "hello"
         assert data["level"] == "INFO"
         assert data["custom_field"] == "extra"
 
 
-class TestLambdaHandler:
-    def test_error_status_when_required_env_missing(self):
-        os.environ.pop("DYNAMODB_CONFIG_TABLE", None)
-        os.environ.pop("DYNAMODB_TRACKING_TABLE", None)
-        os.environ.pop("SSO_INSTANCE_ARN", None)
-        out = handler.lambda_handler({"source": "account_creation"}, None)
-        assert out["status"] == "error"
-        assert "Missing required environment variable" in out["errors"]["message"]
+class TestGroup:
+    def test_to_json(self):
+        g = handler.Group(name="TeamA", id="g-1")
+        assert json.loads(g.to_json()) == {"name": "TeamA", "id": "g-1"}
 
-    @patch.object(handler, "reconcile_assignments", return_value=([], []))
-    @patch.object(handler, "assign_permissions", return_value=([], []))
-    @patch.object(handler, "get_permission_sets", return_value={"Admin": "arn:ps"})
-    @patch.object(handler, "get_identity_store_groups", return_value={"MyGroup": "g-1"})
-    @patch.object(handler, "load_configuration")
-    @patch.object(handler, "get_account_tags", return_value={"sso/tpl": "MyGroup"})
-    @patch.object(handler, "ensure_account_exists")
-    @patch.object(handler, "list_active_accounts")
-    @patch.object(handler, "get_identity_store_id", return_value="d-store")
-    def test_single_account_success_path(
-        self,
-        _mock_get_identity_store_id,
-        mock_list_active,
-        mock_ensure,
-        _mock_get_account_tags,
-        mock_load_cfg,
-        _mock_get_groups,
-        _mock_get_ps,
-        mock_assign,
-        _mock_reconcile,
-    ):
-        os.environ["DYNAMODB_CONFIG_TABLE"] = "cfg"
-        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
-        os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
-        os.environ["SSO_ACCOUNT_TAG_PREFIX"] = "sso"
 
-        cfg = handler.Configuration(
-            groups={
-                "tpl": handler.GroupConfiguration(
-                    permission_sets=["Admin"], enabled=True
-                ),
-            }
+class TestPermissionSet:
+    def test_to_json(self):
+        ps = handler.PermissionSet(name="Admin", arn="arn:ps:1")
+        assert json.loads(ps.to_json()) == {"name": "Admin", "arn": "arn:ps:1"}
+
+
+class TestBinding:
+    def test_to_json_includes_nested_groups(self):
+        b = handler.Binding(
+            account_id="123456789012",
+            permission_set_name="Admin",
+            permission_set_arn="arn:ps:1",
+            groups=[handler.Group(name="TeamA", id="g-1")],
+            template_name="tpl",
         )
-        mock_load_cfg.return_value = cfg
+        data = json.loads(b.to_json())
+        assert data["account_id"] == "123456789012"
+        assert data["template_name"] == "tpl"
+        assert data["groups"] == [{"name": "TeamA", "id": "g-1"}]
 
-        event = {"source": "account_creation", "account_id": "123456789012"}
-        out = handler.lambda_handler(event, None)
 
-        assert out["status"] == "success"
-        assert out["account_id"] == "123456789012"
-        mock_ensure.assert_called_once_with("123456789012")
-        mock_list_active.assert_not_called()
-        mock_assign.assert_called_once()
-        _args, kwargs = mock_assign.call_args
-        assert kwargs["instance_arn"] == "arn:aws:sso:::instance/x"
-        bound = kwargs["bindings"]
-        assert len(bound) == 1
-        assert bound[0].account_id == "123456789012"
-        assert bound[0].permission_set_name == "Admin"
-        assert bound[0].groups[0].name == "MyGroup"
+class TestPermission:
+    def test_to_json(self):
+        p = handler.Permission(name="default", groups=["A", "B"])
+        assert json.loads(p.to_json()) == {"name": "default", "groups": ["A", "B"]}
 
-    @patch.object(handler, "reconcile_assignments", return_value=([], []))
-    @patch.object(handler, "assign_permissions", return_value=([], []))
-    @patch.object(handler, "get_permission_sets", return_value={"Admin": "arn:ps"})
-    @patch.object(handler, "get_identity_store_groups", return_value={"MyGroup": "g-1"})
-    @patch.object(handler, "load_configuration")
-    @patch.object(handler, "get_account_tags", return_value={"sso/tpl": "MyGroup"})
-    @patch.object(handler, "ensure_account_exists")
-    @patch.object(handler, "list_active_accounts", return_value=["123456789012"])
-    @patch.object(handler, "get_identity_store_id", return_value="d-store")
-    def test_cron_uses_list_active_accounts(
-        self,
-        _mock_get_identity_store_id,
-        mock_list_active,
-        mock_ensure,
-        _mock_get_account_tags,
-        mock_load_cfg,
-        _mock_get_groups,
-        _mock_get_ps,
-        _mock_assign,
-        _mock_reconcile,
-    ):
-        os.environ["DYNAMODB_CONFIG_TABLE"] = "cfg"
-        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
-        os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
-        os.environ["SSO_ACCOUNT_TAG_PREFIX"] = "sso"
 
-        mock_load_cfg.return_value = handler.Configuration(
-            groups={"tpl": handler.GroupConfiguration(permission_sets=["Admin"])}
+class TestAccount:
+    def test_get_permission_tags_filters_and_splits(self):
+        acct = handler.Account(
+            id="123456789012",
+            name="acct",
+            tags={
+                "sso/default": " Alpha , Beta , ,",
+                "other": "x",
+                "sso/security": "Gamma",
+            },
         )
+        perms = acct.get_permission_tags("sso")
+        by_name = {p.name: p.groups for p in perms}
+        assert by_name == {
+            "default": ["Alpha", "Beta"],
+            "security": ["Gamma"],
+        }
 
-        out = handler.lambda_handler({"source": "cron_schedule"}, None)
-        assert out["status"] == "success"
-        mock_list_active.assert_called_once()
-        mock_ensure.assert_not_called()
-
-    @patch.object(handler, "reconcile_assignments", return_value=([], []))
-    @patch.object(handler, "assign_permissions", return_value=([], []))
-    @patch.object(handler, "get_permission_sets", return_value={"Admin": "arn:ps"})
-    @patch.object(handler, "get_identity_store_groups", return_value={"MyGroup": "g-1"})
-    @patch.object(handler, "load_configuration")
-    @patch.object(handler, "get_account_tags", return_value={"sso/tpl": "MyGroup"})
-    @patch.object(handler, "ensure_account_exists")
-    @patch.object(handler, "list_active_accounts")
-    @patch.object(handler, "get_identity_store_id", return_value="d-store")
-    def test_default_tag_prefix_sso_when_env_unset(
-        self,
-        _mock_get_identity_store_id,
-        _mock_list_active,
-        _mock_ensure,
-        mock_get_account_tags,
-        mock_load_cfg,
-        _mock_get_groups,
-        _mock_get_ps,
-        mock_assign,
-        _mock_reconcile,
-    ):
-        os.environ["DYNAMODB_CONFIG_TABLE"] = "cfg"
-        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
-        os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
-        os.environ.pop("SSO_ACCOUNT_TAG_PREFIX", None)
-
-        mock_load_cfg.return_value = handler.Configuration(
-            groups={"tpl": handler.GroupConfiguration(permission_sets=["Admin"])}
+    def test_to_json(self):
+        acct = handler.Account(
+            id="1", name="n", tags={"k": "v"}, organizational_unit_path="ou/x"
         )
+        data = json.loads(acct.to_json())
+        assert data["id"] == "1"
+        assert data["tags"] == {"k": "v"}
 
-        out = handler.lambda_handler(
-            {"source": "account_creation", "account_id": "123456789012"},
-            None,
+
+class TestTemplate:
+    def test_to_json(self):
+        t = handler.Template(permission_sets=["Admin"], description="desc")
+        assert json.loads(t.to_json()) == {
+            "permission_sets": ["Admin"],
+            "description": "desc",
+        }
+
+
+class TestAssignment:
+    def test_to_json(self):
+        a = handler.Assignment(
+            assignment_id="a#b#c",
+            account_id="123",
+            permission_set_arn="arn:ps",
+            permission_set_name="Admin",
+            principal_id="g-1",
+            principal_type="GROUP",
+            template_name="tpl",
+            group_name="TeamA",
+            created_at="t1",
+            last_seen="t2",
         )
-        assert out["status"] == "success"
-        mock_get_account_tags.assert_called()
-        mock_assign.assert_called_once()
+        data = json.loads(a.to_json())
+        assert data["assignment_id"] == "a#b#c"
+        assert data["principal_type"] == "GROUP"
 
-    @patch.object(handler, "reconcile_assignments", return_value=([], []))
-    @patch.object(handler, "assign_permissions", return_value=([], []))
-    @patch.object(handler, "get_permission_sets", return_value={"Admin": "arn:ps"})
-    @patch.object(handler, "get_identity_store_groups", return_value={"MyGroup": "g-1"})
-    @patch.object(handler, "load_configuration")
-    @patch.object(handler, "get_account_tags", return_value={"sso/unknown": "MyGroup"})
-    @patch.object(handler, "ensure_account_exists")
-    @patch.object(handler, "list_active_accounts")
-    @patch.object(handler, "get_identity_store_id", return_value="d-store")
-    def test_unknown_template_records_failure_and_failed_status(
-        self,
-        _mock_get_identity_store_id,
-        _mock_list_active,
-        _mock_ensure,
-        _mock_get_account_tags,
-        mock_load_cfg,
-        _mock_get_groups,
-        _mock_get_ps,
-        mock_assign,
-        _mock_reconcile,
-    ):
-        os.environ["DYNAMODB_CONFIG_TABLE"] = "cfg"
-        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
-        os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
-        os.environ["SSO_ACCOUNT_TAG_PREFIX"] = "sso"
 
-        mock_load_cfg.return_value = handler.Configuration(groups={})
-
-        out = handler.lambda_handler(
-            {"source": "account_creation", "account_id": "123456789012"},
-            None,
+class TestAccountTemplateMatcher:
+    def test_matches_all_conditions(self):
+        matcher = handler.AccountTemplateMatcher(
+            organizational_units=["ou-prod/ou-workloads*"],
+            name_pattern="prod-*",
+            account_tags={"Environment": "Production"},
         )
-        assert out["status"] == "failed"
-        assert out["errors"]["count"] == 1
+        acct = handler.Account(
+            id="1",
+            name="prod-app-1",
+            tags={"Environment": "Production", "CostCenter": "Eng"},
+            organizational_unit_path="r-abc/ou-prod/ou-workloads/ou-team1",
+        )
+        assert matcher.matches(acct) is True
+
+    def test_matches_fails_on_tag_mismatch(self):
+        matcher = handler.AccountTemplateMatcher(
+            account_tags={"Environment": "Production"}
+        )
+        acct = handler.Account(id="1", name="x", tags={"Environment": "Dev"})
+        assert matcher.matches(acct) is False
+
+    def test_matches_tags_single_and_multiple_conditions(self):
+        matcher = handler.AccountTemplateMatcher(
+            account_tags={"Environment": "Production", "CostCenter": "Eng"}
+        )
+        acct_ok = handler.Account(
+            id="1",
+            name="x",
+            tags={"Environment": "Production", "CostCenter": "Eng", "Owner": "me"},
+        )
+        acct_missing = handler.Account(
+            id="2", name="x", tags={"Environment": "Production"}
+        )
+        acct_value_mismatch = handler.Account(
+            id="3",
+            name="x",
+            tags={"Environment": "Production", "CostCenter": "Finance"},
+        )
+        assert matcher.matches(acct_ok) is True
+        assert matcher.matches(acct_missing) is False
+        assert matcher.matches(acct_value_mismatch) is False
+
+    def test_matches_organizational_unit_trailing_path(self):
+        matcher = handler.AccountTemplateMatcher(
+            organizational_units=["ou-prod/ou-workloads"]
+        )
         assert (
-            out["results"]["failed"][0]["error"]
-            == "Permission template not found in configuration"
-        )
-        # No bindings are produced for an unknown template, so we should not
-        # attempt to call assign_permissions at all.
-        mock_assign.assert_not_called()
-
-    @patch.object(handler, "assign_permissions", return_value=([], []))
-    @patch.object(handler, "get_permission_sets", return_value={"Admin": "arn:ps"})
-    @patch.object(handler, "get_identity_store_groups", return_value={"MyGroup": "g-1"})
-    @patch.object(handler, "load_configuration")
-    @patch.object(handler, "get_account_tags", return_value={"sso/tpl": "MyGroup"})
-    @patch.object(handler, "ensure_account_exists")
-    @patch.object(handler, "list_active_accounts")
-    @patch.object(handler, "get_identity_store_id", return_value="d-store")
-    def test_disabled_template_records_failure(
-        self,
-        _mock_get_identity_store_id,
-        _mock_list_active,
-        _mock_ensure,
-        _mock_get_account_tags,
-        mock_load_cfg,
-        _mock_get_groups,
-        _mock_get_ps,
-        _mock_assign,
-    ):
-        os.environ["DYNAMODB_CONFIG_TABLE"] = "cfg"
-        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
-        os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
-        os.environ["SSO_ACCOUNT_TAG_PREFIX"] = "sso"
-
-        mock_load_cfg.return_value = handler.Configuration(
-            groups={
-                "tpl": handler.GroupConfiguration(
-                    permission_sets=["Admin"], enabled=False
-                )
-            }
-        )
-
-        out = handler.lambda_handler(
-            {"source": "account_creation", "account_id": "123456789012"},
-            None,
-        )
-        assert out["status"] == "failed"
-        assert "not enabled" in out["results"]["failed"][0]["error"]
-
-    @patch.object(handler, "assign_permissions", return_value=([], []))
-    @patch.object(handler, "get_permission_sets", return_value={"Admin": "arn:ps"})
-    @patch.object(handler, "get_identity_store_groups", return_value={"MyGroup": "g-1"})
-    @patch.object(handler, "load_configuration")
-    @patch.object(handler, "get_account_tags", return_value={"sso/tpl": "MyGroup"})
-    @patch.object(handler, "reconcile_assignments", return_value=([], []))
-    @patch.object(handler, "ensure_account_exists")
-    @patch.object(
-        handler, "list_active_accounts", return_value=["111111111111", "222222222222"]
-    )
-    @patch.object(handler, "get_identity_store_id", return_value="d-store")
-    def test_cron_accumulates_bindings_across_accounts(
-        self,
-        _mock_get_identity_store_id,
-        _mock_list_active,
-        _mock_ensure,
-        mock_reconcile,
-        _mock_get_account_tags,
-        mock_load_cfg,
-        _mock_get_groups,
-        _mock_get_ps,
-        mock_assign,
-    ):
-        os.environ["DYNAMODB_CONFIG_TABLE"] = "tbl"
-        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
-        os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
-        os.environ["SSO_ACCOUNT_TAG_PREFIX"] = "sso"
-
-        mock_load_cfg.return_value = handler.Configuration(
-            groups={"tpl": handler.GroupConfiguration(permission_sets=["Admin"])}
-        )
-
-        handler.lambda_handler({"source": "cron_schedule"}, None)
-
-        # assign_permissions runs once with all bindings across accounts.
-        mock_assign.assert_called_once()
-        bindings = mock_assign.call_args.kwargs["bindings"]
-        assert len(bindings) == 2
-        assert {b.account_id for b in bindings} == {"111111111111", "222222222222"}
-
-        # Reconciliation runs once with the full desired bindings.
-        mock_reconcile.assert_called_once()
-        assert (
-            mock_reconcile.call_args.kwargs["desired_bindings"] == bindings
-        ), "Reconcile should receive all desired bindings"
-
-    @patch.object(
-        handler,
-        "assign_permissions",
-        return_value=(
-            [],
-            [{"account_id": "123456789012", "error": "assignment boom"}],
-        ),
-    )
-    @patch.object(handler, "get_permission_sets", return_value={"Admin": "arn:ps"})
-    @patch.object(handler, "get_identity_store_groups", return_value={"MyGroup": "g-1"})
-    @patch.object(handler, "load_configuration")
-    @patch.object(handler, "get_account_tags", return_value={"sso/tpl": "MyGroup"})
-    @patch.object(handler, "ensure_account_exists")
-    @patch.object(handler, "list_active_accounts")
-    @patch.object(handler, "get_identity_store_id", return_value="d-store")
-    def test_failed_status_when_assign_permissions_reports_failures(
-        self,
-        _mock_get_identity_store_id,
-        _mock_list_active,
-        _mock_ensure,
-        _mock_get_account_tags,
-        mock_load_cfg,
-        _mock_get_groups,
-        _mock_get_ps,
-        _mock_assign,
-    ):
-        os.environ["DYNAMODB_CONFIG_TABLE"] = "tbl"
-        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
-        os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
-        os.environ["SSO_ACCOUNT_TAG_PREFIX"] = "sso"
-
-        mock_load_cfg.return_value = handler.Configuration(
-            groups={"tpl": handler.GroupConfiguration(permission_sets=["Admin"])}
-        )
-
-        out = handler.lambda_handler(
-            {"source": "account_creation", "account_id": "123456789012"},
-            None,
-        )
-        assert out["status"] == "failed"
-        assert "assignment boom" in out["results"]["failed"][-1]["error"]
-
-    @patch.object(handler, "get_identity_store_id", side_effect=RuntimeError("boom"))
-    def test_unhandled_exception_returns_error_payload(self, _mock):
-        os.environ["DYNAMODB_CONFIG_TABLE"] = "cfg"
-        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
-        os.environ["SSO_INSTANCE_ARN"] = "arn:aws:sso:::instance/x"
-        out = handler.lambda_handler({"source": "x", "account_id": "1"}, None)
-        assert out["status"] == "error"
-        assert out["errors"]["message"] == "boom"
-        assert isinstance(out["time_taken"], float)
-        assert out["time_taken"] >= 0
-
-
-class TestRecordAssignment:
-    """Test assignment tracking record functionality."""
-
-    def test_records_assignment_to_dynamodb(self):
-        """Test that a successful assignment is recorded to the tracking table."""
-        mock_dynamodb = MagicMock()
-        mock_table = MagicMock()
-        mock_dynamodb.Table.return_value = mock_table
-
-        with patch.object(handler, "dynamodb", mock_dynamodb):
-            handler.record_tracking_assignment(
-                tracking_table_name="tracking_tbl",
-                assignment_id="123456789012#g-1#arn:ps",
-                account_id="123456789012",
-                permission_set_arn="arn:ps",
-                permission_set_name="Admin",
-                principal_id="g-1",
-                principal_type="GROUP",
-                template_name="default",
-                group_name="test-group",
+            matcher.matches_organizational_unit(
+                "r-abc/ou-prod/ou-workloads", ["ou-prod/ou-workloads"]
             )
-
-        mock_dynamodb.Table.assert_called_once_with("tracking_tbl")
-        # Verify put_item was called
-        mock_table.put_item.assert_called_once()
-        item = mock_table.put_item.call_args[1]["Item"]
-        assert item["assignment_id"] == "123456789012#g-1#arn:ps"
-        assert item["account_id"] == "123456789012"
-        assert item["permission_set_arn"] == "arn:ps"
-        assert item["permission_set_name"] == "Admin"
-        assert item["principal_id"] == "g-1"
-        assert item["principal_type"] == "GROUP"
-        assert item["template_name"] == "default"
-        assert item["group_name"] == "test-group"
-
-    def test_raises_on_dynamodb_error(self):
-        """Test that a ClientError is properly handled and re-raised."""
-        mock_dynamodb = MagicMock()
-        mock_table = MagicMock()
-        mock_dynamodb.Table.return_value = mock_table
-        mock_table.put_item.side_effect = ClientError(
-            {"Error": {"Code": "ValidationException", "Message": "boom"}}, "PutItem"
+            is True
+        )
+        assert (
+            matcher.matches_organizational_unit(
+                "r-abc/ou-dev/ou-workloads", ["ou-prod/*"]
+            )
+            is False
         )
 
-        with patch.object(handler, "dynamodb", mock_dynamodb):
-            with pytest.raises(
-                handler.HandlerError, match="Could not record assignment"
-            ):
-                handler.record_tracking_assignment(
-                    tracking_table_name="tracking_tbl",
-                    assignment_id="123456789012#g-1#arn:ps",
-                    account_id="123456789012",
-                    permission_set_arn="arn:ps",
-                    permission_set_name="Admin",
-                    principal_id="g-1",
-                    principal_type="GROUP",
-                    template_name="default",
-                    group_name="test-group",
-                )
+    def test_matches_organizational_unit_for_leading_slash_paths_and_globs(self):
+        matcher = handler.AccountTemplateMatcher(organizational_units=["workloads/*"])
+        acct = handler.Account(
+            id="1",
+            name="TestAccount",
+            tags={},
+            organizational_unit_path="/workloads/development",
+        )
+        assert matcher.matches(acct) is True
+
+    def test_matches_organizational_unit_for_exact_trailing_path(self):
+        matcher = handler.AccountTemplateMatcher(
+            organizational_units=["workloads/development"]
+        )
+        acct = handler.Account(
+            id="1",
+            name="TestAccount",
+            tags={},
+            organizational_unit_path="/workloads/development",
+        )
+        assert matcher.matches(acct) is True
+
+    def test_matches_organizational_unit_negative_when_path_does_not_match(self):
+        matcher = handler.AccountTemplateMatcher(organizational_units=["workspaces/*"])
+        acct = handler.Account(
+            id="1",
+            name="TestAccount",
+            tags={},
+            organizational_unit_path="/workloads/development",
+        )
+        assert matcher.matches(acct) is False
+
+    def test_matches_name_patterns(self):
+        matcher = handler.AccountTemplateMatcher(
+            name_patterns=["prod-[a-z]*-[0-9][0-9]", "shared-*"]
+        )
+        assert matcher.matches(handler.Account(id="1", name="prod-app-12")) is True
+        assert matcher.matches(handler.Account(id="2", name="shared-services")) is True
+        assert matcher.matches(handler.Account(id="3", name="prod-APP-12")) is False
+
+    def test_matches_combined_tags_and_name_conditions(self):
+        matcher = handler.AccountTemplateMatcher(
+            account_tags={"Environment": "Production"},
+            name_patterns=["prod-[a-z]*-[0-9]"],
+        )
+        acct_ok = handler.Account(
+            id="1",
+            name="prod-app-1",
+            tags={"Environment": "Production"},
+        )
+        acct_bad_tag = handler.Account(
+            id="2",
+            name="prod-app-1",
+            tags={"Environment": "Dev"},
+        )
+        acct_bad_name = handler.Account(
+            id="3",
+            name="prod-app-x",
+            tags={"Environment": "Production"},
+        )
+        assert matcher.matches(acct_ok) is True
+        assert matcher.matches(acct_bad_tag) is False
+        assert matcher.matches(acct_bad_name) is False
 
 
-class TestGetTrackingAssignments:
-    """Test retrieval of tracked assignments."""
+class TestAccountTemplate:
+    def test_to_json(self):
+        at = handler.AccountTemplate(
+            name="baseline",
+            matcher=handler.AccountTemplateMatcher(name_pattern="prod-*"),
+            template_names=["default"],
+            groups=["TeamA"],
+            description="d",
+        )
+        data = json.loads(at.to_json())
+        assert data["name"] == "baseline"
+        assert data["template_names"] == ["default"]
 
-    def test_retrieves_assignments(self):
-        """Test that assignments are retrieved via scan."""
-        mock_dynamodb = MagicMock()
-        mock_table = MagicMock()
-        mock_dynamodb.Table.return_value = mock_table
 
-        mock_table.scan.return_value = {
+class TestConfiguration:
+    def test_load_populates_templates_and_account_templates(self):
+        fake_table = MagicMock()
+        fake_table.scan.return_value = {
             "Items": [
                 {
-                    "assignment_id": "123456789012#g-1#arn:ps1",
-                    "account_id": "123456789012",
-                    "permission_set_arn": "arn:ps1",
-                    "permission_set_name": "Admin",
-                    "principal_id": "g-1",
-                    "principal_type": "GROUP",
-                    "template_name": "default",
-                    "group_name": "test-group",
-                    "created_at": "2026-01-01T00:00:00+00:00",
-                    "last_seen": "2026-01-01T00:00:00+00:00",
-                }
-            ],
+                    "type": "template",
+                    "group_name": "default",
+                    "permission_sets": ["Admin"],
+                    "description": "Default",
+                },
+                {
+                    "type": "account_template",
+                    "group_name": "prod-baseline",
+                    "matcher": {
+                        "name_pattern": "prod-*",
+                        "name_patterns": ["prod-*-*"],
+                        "organizational_units": ["ou-prod/*"],
+                        "account_tags": {"Environment": "Production"},
+                    },
+                    "excluded": [r"^111111111111$", r"^prod-secret-.*$"],
+                },
+            ]
         }
+        fake_ddb = MagicMock()
+        fake_ddb.Table.return_value = fake_table
 
-        with patch.object(handler, "dynamodb", mock_dynamodb):
-            result = handler.get_tracking_assignments("tracking")
+        with patch.object(handler.boto3, "resource", return_value=fake_ddb):
+            cfg = handler.Configuration("cfg-table")
+            cfg.load()
 
-        assert len(result) == 1
-        assert result[0].assignment_id == "123456789012#g-1#arn:ps1"
-        assert result[0].account_id == "123456789012"
-
-        mock_table.scan.assert_called_once()
-
-    def test_raises_on_dynamodb_error(self):
-        """Test that a ClientError is properly handled and re-raised."""
-        mock_dynamodb = MagicMock()
-        mock_table = MagicMock()
-        mock_dynamodb.Table.return_value = mock_table
-        mock_table.scan.side_effect = ClientError(
-            {"Error": {"Code": "ResourceNotFoundException", "Message": "boom"}}, "Scan"
-        )
-
-        with patch.object(handler, "dynamodb", mock_dynamodb):
-            with pytest.raises(handler.HandlerError, match="Could not get assignments"):
-                handler.get_tracking_assignments("tracking")
+        assert "default" in cfg.templates
+        assert cfg.templates["default"].permission_sets == ["Admin"]
+        assert "prod-baseline" in cfg.account_templates
+        assert cfg.account_templates["prod-baseline"].matcher.name_pattern == "prod-*"
+        assert cfg.account_templates["prod-baseline"].matcher.name_patterns == [
+            "prod-*-*"
+        ]
+        assert cfg.account_templates["prod-baseline"].excluded == [
+            r"^111111111111$",
+            r"^prod-secret-.*$",
+        ]
 
 
-class TestDeletePermission:
-    """Test assignment deletion functionality."""
+class TestIdentityCenter:
+    def test_init_calls_list_groups_and_list_permission_sets_and_caches_results(self):
+        mock_admin_client = MagicMock()
+        paginator = MagicMock()
+        paginator.paginate.return_value = [
+            {
+                "Instances": [
+                    {
+                        "InstanceArn": "arn:aws:sso:::instance/ssoins-1234567890abcdef",
+                        "IdentityStoreId": "d-1234567890",
+                    }
+                ]
+            }
+        ]
+        mock_admin_client.get_paginator.return_value = paginator
+        mock_identitystore_client = MagicMock()
 
-    def test_successfully_deletes_assignment(self):
-        """Test that an assignment is successfully deleted."""
-        mock_sso = MagicMock()
-        mock_sso.delete_account_assignment.return_value = {
-            "AccountAssignmentDeletionStatus": {"RequestId": "req-1"}
-        }
-        mock_sso.describe_account_assignment_deletion_status.return_value = {
-            "AccountAssignmentDeletionStatus": {"Status": "SUCCEEDED"}
-        }
-
-        with patch.object(handler, "sso_admin", mock_sso):
-            handler.delete_permission(
-                instance_arn="arn:i",
-                account_id="123456789012",
-                permission_set_arn="arn:ps",
-                principal_id="g-1",
-                principal_type="GROUP",
-                poll_timeout_seconds=5,
-                poll_interval_seconds=0.01,
+        with (
+            patch.object(
+                handler.boto3,
+                "client",
+                side_effect=[mock_admin_client, mock_identitystore_client],
+            ) as p_client,
+            patch.object(
+                handler.IdentityCenter,
+                "list_groups",
+                return_value=[handler.Group(name="TeamA", id="g-1")],
+            ) as p_list_groups,
+            patch.object(
+                handler.IdentityCenter,
+                "list_permission_sets",
+                return_value=[handler.PermissionSet(name="Admin", arn="arn:ps:1")],
+            ) as p_list_permission_sets,
+        ):
+            ic = handler.IdentityCenter(
+                instance_arn="arn:aws:sso:::instance/ssoins-1234567890abcdef"
             )
 
-        mock_sso.delete_account_assignment.assert_called_once_with(
+        assert p_client.call_args_list == [
+            call("sso-admin", region_name=handler._AWS_REGION),
+            call("identitystore", region_name=handler._AWS_REGION),
+        ]
+        p_list_groups.assert_called_once()
+        p_list_permission_sets.assert_called_once()
+        assert ic.groups == [handler.Group(name="TeamA", id="g-1")]
+        assert ic.permission_sets == [
+            handler.PermissionSet(name="Admin", arn="arn:ps:1")
+        ]
+        assert ic.identity_store_id == "d-1234567890"
+
+    def test_has_group_and_get_group_use_cached_groups(self):
+        ic = handler.IdentityCenter.__new__(handler.IdentityCenter)
+        ic.instance_arn = "arn:i"
+        ic.client = MagicMock()
+        ic.identitystore_client = MagicMock()
+        ic.permission_sets = []
+        ic.groups = [handler.Group(name="TeamA", id="g-1")]
+        assert ic.has_group("TeamA") is True
+        assert ic.has_group("Missing") is False
+        assert ic.get_group("TeamA").id == "g-1"
+        assert ic.get_group("Missing") is None
+
+    def test_list_groups_populates_cache_and_is_used_by_has_group_and_get_group(self):
+        ic = handler.IdentityCenter.__new__(handler.IdentityCenter)
+        ic.instance_arn = "arn:aws:sso:::instance/ssoins-1234567890abcdef"
+        ic.identity_store_id = "d-1234567890"
+        ic.groups = []
+        ic.permission_sets = []
+
+        mock_identitystore_client = MagicMock()
+        paginator = MagicMock()
+        paginator.paginate.return_value = [
+            {"Groups": [{"DisplayName": "TeamA", "GroupId": "g-1"}]}
+        ]
+        mock_identitystore_client.get_paginator.return_value = paginator
+        ic.identitystore_client = mock_identitystore_client
+        ic.client = MagicMock()
+
+        assert ic.has_group("TeamA") is True
+        grp = ic.get_group("TeamA")
+        assert grp is not None
+        assert grp.id == "g-1"
+        # Ensure list_groups cached results (second call should not hit paginator)
+        assert ic.list_groups() == [handler.Group(name="TeamA", id="g-1")]
+        mock_identitystore_client.get_paginator.assert_called_once_with("list_groups")
+
+    def test_list_permission_sets_builds_objects(self):
+        ic = handler.IdentityCenter.__new__(handler.IdentityCenter)
+        ic.instance_arn = "arn:i"
+        ic.groups = []
+        ic.permission_sets = []
+        ic.poll_timeout_seconds = 1
+        ic.poll_interval_seconds = 0.01
+
+        mock_client = MagicMock()
+        paginator = MagicMock()
+        paginator.paginate.return_value = [{"PermissionSets": ["arn:ps:1"]}]
+        mock_client.get_paginator.return_value = paginator
+        mock_client.describe_permission_set.return_value = {
+            "PermissionSet": {"Name": "Admin", "PermissionSetArn": "arn:ps:1"}
+        }
+        ic.client = mock_client
+
+        out = ic.list_permission_sets()
+        assert [(p.name, p.arn) for p in out] == [("Admin", "arn:ps:1")]
+        # Ensure list_permission_sets cached results
+        assert ic.permission_sets == out
+
+    def test_list_permission_sets_cache_hit_does_not_call_paginator(self):
+        ic = handler.IdentityCenter.__new__(handler.IdentityCenter)
+        ic.instance_arn = "arn:i"
+        ic.groups = []
+        ic.permission_sets = [handler.PermissionSet(name="Cached", arn="arn:cached")]
+        ic.client = MagicMock()
+
+        out = ic.list_permission_sets()
+        assert out == ic.permission_sets
+        ic.client.get_paginator.assert_not_called()
+
+    def test_list_groups_cache_hit_does_not_call_paginator(self):
+        ic = handler.IdentityCenter.__new__(handler.IdentityCenter)
+        ic.instance_arn = "arn:i"
+        ic.groups = [handler.Group(name="TeamA", id="g-1")]
+        ic.permission_sets = []
+        ic.client = MagicMock()
+
+        out = ic.list_groups()
+        assert out == ic.groups
+        ic.client.get_paginator.assert_not_called()
+
+    def test_create_assignment_skips_when_preexisting_assignment_found(self):
+        ic = handler.IdentityCenter.__new__(handler.IdentityCenter)
+        ic.instance_arn = "arn:i"
+        ic.poll_timeout_seconds = 1
+        ic.poll_interval_seconds = 0.01
+        ic.groups = []
+        ic.permission_sets = []
+
+        mock_client = MagicMock()
+        mock_client.list_account_assignments.return_value = {
+            "AccountAssignments": [
+                {"PrincipalId": "g-1", "PrincipalType": "GROUP"},
+            ]
+        }
+        ic.client = mock_client
+
+        ic.create_assignment(
+            account_id="123",
+            permission_set_arn="arn:ps",
+            permission_set_name="Admin",
+            principal_type="GROUP",
+            principal_id="g-1",
+        )
+
+        mock_client.list_account_assignments.assert_called_once_with(
+            InstanceArn="arn:i",
+            AccountId="123",
+            PermissionSetArn="arn:ps",
+        )
+        mock_client.create_account_assignment.assert_not_called()
+        mock_client.describe_account_assignment_creation_status.assert_not_called()
+
+    def test_create_assignment_creates_when_nonexistent_and_polls_to_succeeded(self):
+        ic = handler.IdentityCenter.__new__(handler.IdentityCenter)
+        ic.instance_arn = "arn:i"
+        ic.poll_timeout_seconds = 5
+        ic.poll_interval_seconds = 0.01
+        ic.groups = []
+        ic.permission_sets = []
+
+        mock_client = MagicMock()
+        mock_client.list_account_assignments.return_value = {"AccountAssignments": []}
+        mock_client.create_account_assignment.return_value = {
+            "AccountAssignmentCreationStatus": {"RequestId": "req-1"}
+        }
+        mock_client.describe_account_assignment_creation_status.return_value = {
+            "AccountAssignmentCreationStatus": {"Status": "SUCCEEDED"}
+        }
+        ic.client = mock_client
+
+        ic.create_assignment(
+            account_id="123",
+            permission_set_arn="arn:ps",
+            permission_set_name="Admin",
+            principal_type="GROUP",
+            principal_id="g-1",
+        )
+
+        mock_client.create_account_assignment.assert_called_once_with(
             InstanceArn="arn:i",
             PermissionSetArn="arn:ps",
             PrincipalId="g-1",
             PrincipalType="GROUP",
-            TargetId="123456789012",
+            TargetId="123",
             TargetType="AWS_ACCOUNT",
         )
-        mock_sso.describe_account_assignment_deletion_status.assert_called_once()
+        mock_client.describe_account_assignment_creation_status.assert_called_once()
 
-    def test_raises_on_failed_deletion(self):
-        """Test that a failed deletion raises an error."""
-        mock_sso = MagicMock()
-        mock_sso.delete_account_assignment.return_value = {
-            "AccountAssignmentDeletionStatus": {"RequestId": "req-1"}
+    def test_create_assignment_raises_when_creation_failed(self):
+        ic = handler.IdentityCenter.__new__(handler.IdentityCenter)
+        ic.instance_arn = "arn:i"
+        ic.poll_timeout_seconds = 5
+        ic.poll_interval_seconds = 0.01
+        ic.groups = []
+        ic.permission_sets = []
+
+        mock_client = MagicMock()
+        mock_client.list_account_assignments.return_value = {"AccountAssignments": []}
+        mock_client.create_account_assignment.return_value = {
+            "AccountAssignmentCreationStatus": {"RequestId": "req-1"}
         }
-        mock_sso.describe_account_assignment_deletion_status.return_value = {
-            "AccountAssignmentDeletionStatus": {
+        mock_client.describe_account_assignment_creation_status.return_value = {
+            "AccountAssignmentCreationStatus": {
                 "Status": "FAILED",
                 "FailureReason": "boom",
             }
         }
+        ic.client = mock_client
 
-        with patch.object(handler, "sso_admin", mock_sso):
-            with pytest.raises(handler.HandlerError, match="boom"):
-                handler.delete_permission(
-                    instance_arn="arn:i",
-                    account_id="123456789012",
-                    permission_set_arn="arn:ps",
-                    principal_id="g-1",
-                    principal_type="GROUP",
-                    poll_timeout_seconds=5,
-                    poll_interval_seconds=0.01,
-                )
+        with pytest.raises(handler.HandlerError, match="boom"):
+            ic.create_assignment(
+                account_id="123",
+                permission_set_arn="arn:ps",
+                permission_set_name="Admin",
+                principal_type="GROUP",
+                principal_id="g-1",
+            )
 
-    def test_raises_on_timeout(self):
-        """Test that a timeout raises an error."""
-        mock_sso = MagicMock()
-        mock_sso.delete_account_assignment.return_value = {
+    def test_delete_assignment_polls_to_succeeded(self):
+        ic = handler.IdentityCenter.__new__(handler.IdentityCenter)
+        ic.instance_arn = "arn:i"
+        ic.poll_timeout_seconds = 5
+        ic.poll_interval_seconds = 0.01
+        ic.groups = []
+        ic.permission_sets = []
+
+        mock_client = MagicMock()
+        mock_client.delete_account_assignment.return_value = {
             "AccountAssignmentDeletionStatus": {"RequestId": "req-1"}
         }
-        mock_sso.describe_account_assignment_deletion_status.return_value = {
-            "AccountAssignmentDeletionStatus": {"Status": "IN_PROGRESS"}
-        }
-
-        with patch.object(handler, "sso_admin", mock_sso):
-            with patch("handler.time.time", side_effect=[0, 100]):
-                with patch("handler.time.sleep"):
-                    with pytest.raises(handler.HandlerError, match="Timed out"):
-                        handler.delete_permission(
-                            instance_arn="arn:i",
-                            account_id="123456789012",
-                            permission_set_arn="arn:ps",
-                            principal_id="g-1",
-                            principal_type="GROUP",
-                            poll_timeout_seconds=5,
-                            poll_interval_seconds=0.01,
-                        )
-
-
-class TestHasMatchingBinding:
-    def test_returns_true_when_binding_contains_matching_group_among_multiple(self):
-        assignment = handler.TrackedAssignment(
-            assignment_id="123456789012#g-2#arn:ps",
-            account_id="123456789012",
-            permission_set_arn="arn:ps",
-            permission_set_name="Admin",
-            principal_id="g-2",
-            principal_type="GROUP",
-            template_name="t",
-            group_name="TeamB",
-        )
-        binding = handler.Binding(
-            account_id="123456789012",
-            permission_set_name="Admin",
-            permission_set_arn="arn:ps",
-            groups=[
-                handler.Group(name="TeamA", id="g-1"),
-                handler.Group(name="TeamB", id="g-2"),
-                handler.Group(name="TeamC", id="g-3"),
-            ],
-            template_name="t",
-        )
-
-        assert (
-            handler.has_matching_binding(assignment=assignment, bindings=[binding])
-            is True
-        )
-
-
-class TestReconcileAssignments:
-    """Test assignment reconciliation functionality."""
-
-    def test_deletes_provisioned_assignment_not_in_desired_bindings(self):
-        mock_sso = MagicMock()
-        mock_dynamodb = MagicMock()
-        mock_table = MagicMock()
-        mock_dynamodb.Table.return_value = mock_table
-
-        # Create a tracked assignment that is NOT in desired bindings
-        tracked_assignment = handler.TrackedAssignment(
-            assignment_id="123456789012#g-extra#arn:ps-extra",
-            account_id="123456789012",
-            permission_set_arn="arn:ps-extra",
-            permission_set_name="Extra",
-            principal_id="g-extra",
-            principal_type="GROUP",
-            template_name="t",
-            group_name="extra",
-            created_at="2025-01-01T00:00:00Z",
-            last_seen="2025-01-01T00:00:00Z",
-        )
-
-        # Deletion succeeds
-        mock_sso.delete_account_assignment.return_value = {
-            "AccountAssignmentDeletionStatus": {"RequestId": "req-1"}
-        }
-        mock_sso.describe_account_assignment_deletion_status.return_value = {
+        mock_client.describe_account_assignment_deletion_status.return_value = {
             "AccountAssignmentDeletionStatus": {"Status": "SUCCEEDED"}
         }
+        ic.client = mock_client
 
-        desired = [
-            handler.Binding(
-                account_id="123456789012",
-                permission_set_name="Admin",
-                permission_set_arn="arn:ps-desired",
-                groups=[handler.Group(name="desired", id="g-desired")],
-                template_name="t",
-            )
-        ]
-
-        with patch.object(handler, "sso_admin", mock_sso):
-            with patch.object(handler, "dynamodb", mock_dynamodb):
-                with patch.object(
-                    handler,
-                    "get_tracking_assignments",
-                    return_value=[tracked_assignment],
-                ):
-                    deleted, failures = handler.reconcile_assignments(
-                        instance_arn="arn:i",
-                        desired_bindings=desired,
-                        tracking_table_name="tracking",
-                        accounts_to_reconcile=["123456789012"],
-                    )
-
-        assert not failures
-        assert len(deleted) == 1
-        assert deleted[0]["assignment_id"] == "123456789012#g-extra#arn:ps-extra"
-
-    def test_does_not_delete_when_assignment_is_desired(self):
-        mock_sso = MagicMock()
-        paginator = MagicMock()
-        paginator.paginate.return_value = [
-            {
-                "AccountAssignments": [
-                    {
-                        "AccountId": "123456789012",
-                        "PermissionSetArn": "arn:ps-desired",
-                        "PrincipalId": "g-desired",
-                        "PrincipalType": "GROUP",
-                    }
-                ]
-            }
-        ]
-        mock_sso.get_paginator.return_value = paginator
-
-        desired = [
-            handler.Binding(
-                account_id="123456789012",
-                permission_set_name="Admin",
-                permission_set_arn="arn:ps-desired",
-                groups=[handler.Group(name="desired", id="g-desired")],
-                template_name="t",
-            )
-        ]
-
-        with patch.object(handler, "sso_admin", mock_sso):
-            with patch.object(handler, "get_tracking_assignments", return_value=[]):
-                deleted, failures = handler.reconcile_assignments(
-                    instance_arn="arn:i",
-                    desired_bindings=desired,
-                    tracking_table_name=None,
-                    accounts_to_reconcile=["123456789012"],
-                )
-
-        assert not deleted
-        assert not failures
-        mock_sso.delete_account_assignment.assert_not_called()
-
-    def test_skips_non_group_assignments(self):
-        mock_sso = MagicMock()
-        paginator = MagicMock()
-        paginator.paginate.return_value = [
-            {
-                "AccountAssignments": [
-                    {
-                        "AccountId": "123456789012",
-                        "PermissionSetArn": "arn:ps-user",
-                        "PrincipalId": "u-1",
-                        "PrincipalType": "USER",
-                    }
-                ]
-            }
-        ]
-        mock_sso.get_paginator.return_value = paginator
-
-        with patch.object(handler, "sso_admin", mock_sso):
-            with patch.object(handler, "get_tracking_assignments", return_value=[]):
-                deleted, failures = handler.reconcile_assignments(
-                    instance_arn="arn:i",
-                    desired_bindings=[],
-                    tracking_table_name=None,
-                    accounts_to_reconcile=["123456789012"],
-                )
-
-        assert not deleted
-        assert not failures
-        mock_sso.delete_account_assignment.assert_not_called()
-
-    def test_records_failure_when_deletion_raises(self):
-        mock_sso = MagicMock()
-
-        # Create a tracked assignment that will be deleted (with no matching desired binding)
-        tracked_assignment = handler.TrackedAssignment(
-            assignment_id="123456789012#g-extra#arn:ps-extra",
-            account_id="123456789012",
-            permission_set_arn="arn:ps-extra",
-            permission_set_name="Extra",
-            principal_id="g-extra",
+        ic.delete_assignment(
+            account_id="123",
+            permission_set_arn="arn:ps",
+            permission_set_name="Admin",
+            principal_id="g-1",
             principal_type="GROUP",
-            template_name="t",
-            group_name="extra",
-            created_at="2025-01-01T00:00:00Z",
-            last_seen="2025-01-01T00:00:00Z",
         )
 
-        mock_sso.delete_account_assignment.side_effect = handler.HandlerError("boom")
+        mock_client.delete_account_assignment.assert_called_once_with(
+            InstanceArn="arn:i",
+            PermissionSetArn="arn:ps",
+            PrincipalId="g-1",
+            PrincipalType="GROUP",
+            TargetId="123",
+            TargetType="AWS_ACCOUNT",
+        )
+        mock_client.describe_account_assignment_deletion_status.assert_called_once()
 
-        with patch.object(handler, "sso_admin", mock_sso):
-            with patch.object(
-                handler, "get_tracking_assignments", return_value=[tracked_assignment]
-            ):
-                with patch.object(handler, "delete_tracking_assignment"):
-                    deleted, failures = handler.reconcile_assignments(
-                        instance_arn="arn:i",
-                        desired_bindings=[],
-                        tracking_table_name=None,
-                        accounts_to_reconcile=["123456789012"],
-                    )
+    def test_delete_assignment_raises_when_deletion_failed(self):
+        ic = handler.IdentityCenter.__new__(handler.IdentityCenter)
+        ic.instance_arn = "arn:i"
+        ic.poll_timeout_seconds = 5
+        ic.poll_interval_seconds = 0.01
+        ic.groups = []
+        ic.permission_sets = []
 
+        mock_client = MagicMock()
+        mock_client.delete_account_assignment.return_value = {
+            "AccountAssignmentDeletionStatus": {"RequestId": "req-1"}
+        }
+        mock_client.describe_account_assignment_deletion_status.return_value = {
+            "AccountAssignmentDeletionStatus": {
+                "Status": "FAILED",
+                "FailureReason": "nope",
+            }
+        }
+        ic.client = mock_client
+
+        with pytest.raises(handler.HandlerError, match="nope"):
+            ic.delete_assignment(
+                account_id="123",
+                permission_set_arn="arn:ps",
+                permission_set_name="Admin",
+                principal_id="g-1",
+                principal_type="GROUP",
+            )
+
+
+class TestOrganizations:
+    def test_list_accounts_returns_active_accounts_from_get_account(self):
+        org = handler.Organizations.__new__(handler.Organizations)
+        org.client = MagicMock()
+        paginator = MagicMock()
+        paginator.paginate.return_value = [
+            {
+                "Accounts": [
+                    {"Id": "1", "Status": "ACTIVE"},
+                    {"Id": "2", "Status": "SUSPENDED"},
+                ]
+            }
+        ]
+        org.client.get_paginator.return_value = paginator
+        org.get_account = MagicMock(
+            side_effect=lambda account_id: handler.Account(
+                id=account_id, name=f"n-{account_id}"
+            )
+        )
+
+        accounts = org.list_accounts()
+        assert [a.id for a in accounts] == ["1"]
+        org.get_account.assert_called_once_with("1")
+
+    def test_get_account_sets_tags_and_ou_path_empty_when_no_parents(self):
+        org = handler.Organizations.__new__(handler.Organizations)
+        org.client = MagicMock()
+        org.client.list_tags_for_resource.return_value = {
+            "Tags": [{"Key": "k", "Value": "v"}]
+        }
+        org.client.list_parents.return_value = {"Parents": []}
+
+        acct = org.get_account("123")
+        assert acct.id == "123"
+        assert acct.tags == {"k": "v"}
+        assert acct.organizational_unit_path == ""
+        org.client.list_tags_for_resource.assert_called_once_with(ResourceId="123")
+        org.client.list_parents.assert_called_once_with(ChildId="123")
+
+    def test_get_account_sets_tags_and_builds_ou_path_from_parent_chain(self):
+        org = handler.Organizations.__new__(handler.Organizations)
+        org.client = MagicMock()
+        org._ou_path_cache = {}
+        org._ou_name_cache = {}
+        org.client.list_tags_for_resource.return_value = {
+            "Tags": [{"Key": "Environment", "Value": "Production"}]
+        }
+
+        def describe_ou_side_effect(*, OrganizationalUnitId: str):
+            if OrganizationalUnitId == "ou-0":
+                return {"OrganizationalUnit": {"Name": "Workloads"}}
+            if OrganizationalUnitId == "ou-1":
+                return {"OrganizationalUnit": {"Name": "Development"}}
+            raise AssertionError(
+                f"Unexpected OrganizationalUnitId={OrganizationalUnitId}"
+            )
+
+        def list_parents_side_effect(*, ChildId: str):
+            if ChildId == "123":
+                return {"Parents": [{"Id": "ou-1", "Type": "OU"}]}
+            if ChildId == "ou-1":
+                return {"Parents": [{"Id": "ou-0", "Type": "OU"}]}
+            if ChildId == "ou-0":
+                return {"Parents": [{"Id": "r-root", "Type": "ROOT"}]}
+            raise AssertionError(f"Unexpected ChildId={ChildId}")
+
+        org.client.describe_organizational_unit.side_effect = describe_ou_side_effect
+        org.client.list_parents.side_effect = list_parents_side_effect
+
+        acct = org.get_account("123")
+        assert acct.id == "123"
+        assert acct.tags == {"Environment": "Production"}
+        assert acct.organizational_unit_path == "/workloads/development"
+
+        org.client.list_tags_for_resource.assert_called_once_with(ResourceId="123")
+        assert org.client.list_parents.call_count == 3
+        org.client.list_parents.assert_any_call(ChildId="123")
+        org.client.list_parents.assert_any_call(ChildId="ou-1")
+        org.client.list_parents.assert_any_call(ChildId="ou-0")
+
+    def test_get_account_reuses_cached_ou_path_when_accounts_share_parent_ou(self):
+        org = handler.Organizations.__new__(handler.Organizations)
+        org.client = MagicMock()
+        org._ou_path_cache = {}
+        org._ou_name_cache = {}
+
+        # Same tags response for both accounts (not important for this test).
+        org.client.list_tags_for_resource.return_value = {
+            "Tags": [{"Key": "Environment", "Value": "Production"}]
+        }
+
+        def describe_ou_side_effect(*, OrganizationalUnitId: str):
+            if OrganizationalUnitId == "ou-0":
+                return {"OrganizationalUnit": {"Name": "Workloads"}}
+            if OrganizationalUnitId == "ou-1":
+                return {"OrganizationalUnit": {"Name": "Development"}}
+            raise AssertionError(
+                f"Unexpected OrganizationalUnitId={OrganizationalUnitId}"
+            )
+
+        def list_parents_side_effect(*, ChildId: str):
+            # Two accounts in the same OU (ou-1).
+            if ChildId in {"111", "222"}:
+                return {"Parents": [{"Id": "ou-1", "Type": "OU"}]}
+            # Walk the OU chain once.
+            if ChildId == "ou-1":
+                return {"Parents": [{"Id": "ou-0", "Type": "OU"}]}
+            if ChildId == "ou-0":
+                return {"Parents": [{"Id": "r-root", "Type": "ROOT"}]}
+            raise AssertionError(f"Unexpected ChildId={ChildId}")
+
+        org.client.describe_organizational_unit.side_effect = describe_ou_side_effect
+        org.client.list_parents.side_effect = list_parents_side_effect
+
+        acct1 = org.get_account("111")
+        acct2 = org.get_account("222")
+
+        assert acct1.organizational_unit_path == "/workloads/development"
+        assert acct2.organizational_unit_path == "/workloads/development"
+
+        # First account: list_parents for account + ou-1 + ou-0 = 3 calls
+        # Second account: list_parents for account only (ou-1 is cached) = +1 call
+        assert org.client.list_parents.call_count == 4
+
+    def test_get_account_returns_account_on_client_error(self):
+        org = handler.Organizations.__new__(handler.Organizations)
+        org.client = MagicMock()
+        org.client.list_tags_for_resource.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "nope"}},
+            "ListTagsForResource",
+        )
+        with pytest.raises(handler.HandlerError, match="Could not get account details"):
+            org.get_account("123")
+
+
+class TestTracking:
+    def test_get_assignment_id(self):
+        tr = handler.Tracking.__new__(handler.Tracking)
+        assert tr.get_assignment_id("a", "p", "arn:ps") == "a#p#arn:ps"
+
+    def test_list_returns_assignments(self):
+        fake_table = MagicMock()
+        fake_table.scan.return_value = {
+            "Items": [
+                {
+                    "assignment_id": "a#p#arn",
+                    "account_id": "a",
+                    "permission_set_arn": "arn",
+                    "permission_set_name": "Admin",
+                    "principal_id": "p",
+                    "principal_type": "GROUP",
+                    "template_name": "t",
+                    "group_name": "g",
+                    "created_at": "c",
+                    "last_seen": "l",
+                }
+            ]
+        }
+        fake_ddb = MagicMock()
+        fake_ddb.Table.return_value = fake_table
+
+        with patch.object(handler.boto3, "resource", return_value=fake_ddb):
+            tr = handler.Tracking("tracking-table")
+            out = tr.list()
+
+        assert len(out) == 1
+        assert out[0].assignment_id == "a#p#arn"
+        assert out[0].account_id == "a"
+        assert out[0].permission_set_arn == "arn"
+        assert out[0].permission_set_name == "Admin"
+        assert out[0].principal_id == "p"
+        assert out[0].principal_type == "GROUP"
+        assert out[0].template_name == "t"
+        assert out[0].group_name == "g"
+        assert out[0].created_at == "c"
+        assert out[0].last_seen == "l"
+
+    def test_create_puts_item(self):
+        fake_table = MagicMock()
+        fake_ddb = MagicMock()
+        fake_ddb.Table.return_value = fake_table
+
+        with patch.object(handler.boto3, "resource", return_value=fake_ddb):
+            tr = handler.Tracking("tracking-table")
+            tr.create(
+                account_id="a",
+                permission_set_arn="arn:ps",
+                permission_set_name="Admin",
+                principal_id="p",
+                principal_type="GROUP",
+                template_name="t",
+                group_name="g",
+            )
+
+        fake_table.put_item.assert_called_once()
+
+    def test_delete_calls_delete_item(self):
+        fake_table = MagicMock()
+        fake_ddb = MagicMock()
+        fake_ddb.Table.return_value = fake_table
+        with patch.object(handler.boto3, "resource", return_value=fake_ddb):
+            tr = handler.Tracking("tracking-table")
+            tr.delete("a#p#arn")
+        fake_table.delete_item.assert_called_once_with(Key={"assignment_id": "a#p#arn"})
+
+
+class TestReconcileCreations:
+    def test_returns_empty_when_no_bindings(self):
+        ok, bad = handler.reconcile_creations(
+            [], identity_center=MagicMock(), tracking=MagicMock()
+        )
+        assert not ok
+        assert not bad
+
+    def test_records_success_and_failure_per_group(self):
+        identity_center = MagicMock()
+        tracking = MagicMock()
+
+        def create_side_effect(*_args, **kwargs):
+            if kwargs["principal_id"] == "g-1":
+                raise handler.HandlerError("boom")
+
+        identity_center.create_assignment.side_effect = create_side_effect
+
+        bindings = [
+            handler.Binding(
+                account_id="123",
+                permission_set_name="Admin",
+                permission_set_arn="arn:ps",
+                groups=[
+                    handler.Group(name="A", id="g-1"),
+                    handler.Group(name="B", id="g-2"),
+                ],
+                template_name="tpl",
+            )
+        ]
+
+        successes, failures = handler.reconcile_creations(
+            bindings, identity_center=identity_center, tracking=tracking
+        )
+        assert [s["group_name"] for s in successes] == ["B"]
+        assert [f["group_name"] for f in failures] == ["A"]
+        tracking.create.assert_called_once()
+
+
+class TestReconcileDeletions:
+    def test_returns_empty_when_no_tracked_assignments(self):
+        tracking = MagicMock()
+        tracking.list.return_value = []
+        identity_center = MagicMock()
+        deleted, failed = handler.reconcile_deletions(
+            desired_bindings=[], tracking=tracking, identity_center=identity_center
+        )
         assert not deleted
+        assert not failed
+        identity_center.delete_assignment.assert_not_called()
+        tracking.delete.assert_not_called()
+
+    def test_deletes_only_unmatched_assignments_and_processes_all(self):
+        tracking = MagicMock()
+        identity_center = MagicMock()
+
+        a1 = handler.Assignment(
+            assignment_id="1#p1#arn",
+            account_id="1",
+            permission_set_arn="arn",
+            permission_set_name="Admin",
+            principal_id="p1",
+            principal_type="GROUP",
+            template_name="t",
+            group_name="G1",
+        )
+        a2 = handler.Assignment(
+            assignment_id="2#p2#arn",
+            account_id="2",
+            permission_set_arn="arn",
+            permission_set_name="Admin",
+            principal_id="p2",
+            principal_type="GROUP",
+            template_name="t",
+            group_name="G2",
+        )
+
+        tracking.list.return_value = [a1, a2]
+
+        desired = [
+            handler.Binding(
+                account_id="2",
+                permission_set_name="Admin",
+                permission_set_arn="arn",
+                groups=[handler.Group(name="G2", id="p2")],
+                template_name="t",
+            )
+        ]
+
+        deleted, failed = handler.reconcile_deletions(
+            desired_bindings=desired, tracking=tracking, identity_center=identity_center
+        )
+        assert not failed
+        assert [d["assignment_id"] for d in deleted] == ["1#p1#arn"]
+        identity_center.delete_assignment.assert_called_once()
+        tracking.delete.assert_called_once_with("1#p1#arn")
+
+    def test_ignores_assignment_missing_in_aws_but_still_deletes_tracking(self):
+        tracking = MagicMock()
+        identity_center = MagicMock()
+
+        a1 = handler.Assignment(
+            assignment_id="1#p1#arn",
+            account_id="1",
+            permission_set_arn="arn",
+            permission_set_name="Admin",
+            principal_id="p1",
+            principal_type="GROUP",
+            template_name="t",
+            group_name="G1",
+        )
+        tracking.list.return_value = [a1]
+        identity_center.delete_assignment.side_effect = RuntimeError(
+            "Assignment does not exist"
+        )
+
+        deleted, failed = handler.reconcile_deletions(
+            desired_bindings=[], tracking=tracking, identity_center=identity_center
+        )
+        assert not failed
+        assert not deleted
+        tracking.delete.assert_called_once_with("1#p1#arn")
+
+
+class _ConfigStub:
+    def __init__(self, templates: dict[str, handler.Template], account_templates=None):
+        self.templates = templates
+        self.account_templates = account_templates or {}
+
+
+class _IdentityCenterStub:
+    def __init__(self, groups: dict[str, str], permission_sets: dict[str, str]):
+        self._groups = groups
+        self._permission_sets = permission_sets
+
+    def has_group(self, group_name: str) -> bool:
+        return group_name in self._groups
+
+    def get_group(self, group_name: str) -> handler.Group | None:
+        if group_name not in self._groups:
+            return None
+        return handler.Group(name=group_name, id=self._groups[group_name])
+
+    def get_permission_set(self, name: str) -> handler.PermissionSet | None:
+        arn = self._permission_sets.get(name)
+        if not arn:
+            return None
+        return handler.PermissionSet(name=name, arn=arn)
+
+
+class TestBuildPermissionBindings:
+    def test_fails_when_template_missing(self):
+        acct = handler.Account(id="1", tags={})
+        cfg = _ConfigStub(templates={})
+        ic = _IdentityCenterStub(
+            groups={"G1": "g1"}, permission_sets={"PS1": "arn:ps1"}
+        )
+
+        bindings, successes, failures = handler.build_permission_bindings(
+            account=acct,
+            configuration=cfg,
+            identity_center=ic,
+            permission=handler.Permission(name="tpl", groups=["G1"]),
+        )
+        assert not bindings
+        assert not successes
+        assert (
+            failures
+            and failures[0]["error"] == "Permission template not found in configuration"
+        )
+
+    def test_records_failure_for_missing_group_and_skips_it(self):
+        acct = handler.Account(id="1", tags={})
+        cfg = _ConfigStub(templates={"tpl": handler.Template(permission_sets=["PS1"])})
+        ic = _IdentityCenterStub(
+            groups={"G2": "g2"}, permission_sets={"PS1": "arn:ps1"}
+        )
+
+        bindings, _successes, failures = handler.build_permission_bindings(
+            account=acct,
+            configuration=cfg,
+            identity_center=ic,
+            permission=handler.Permission(name="tpl", groups=["Missing", "G2"]),
+        )
         assert len(failures) == 1
-        assert failures[0]["assignment_id"] == "123456789012#g-extra#arn:ps-extra"
+        assert failures[0]["group"] == "Missing"
+        assert len(bindings) == 1
+        assert [g.name for g in bindings[0].groups] == ["G2"]
+
+    def test_records_failure_for_missing_permission_set_and_omits_binding(self):
+        acct = handler.Account(id="1", tags={})
+        cfg = _ConfigStub(
+            templates={"tpl": handler.Template(permission_sets=["MissingPS", "PS1"])}
+        )
+        ic = _IdentityCenterStub(
+            groups={"G1": "g1"}, permission_sets={"PS1": "arn:ps1"}
+        )
+
+        bindings, _successes, failures = handler.build_permission_bindings(
+            account=acct,
+            configuration=cfg,
+            identity_center=ic,
+            permission=handler.Permission(name="tpl", groups=["G1"]),
+        )
+        assert len(bindings) == 1
+        assert bindings[0].permission_set_name == "PS1"
+        assert any(f["permission"] == "MissingPS" for f in failures)
+
+    def test_creates_one_binding_per_permission_set(self):
+        acct = handler.Account(id="1", tags={})
+        cfg = _ConfigStub(
+            templates={"tpl": handler.Template(permission_sets=["PS1", "PS2"])}
+        )
+        ic = _IdentityCenterStub(
+            groups={"G1": "g1"}, permission_sets={"PS1": "arn:ps1", "PS2": "arn:ps2"}
+        )
+
+        bindings, _successes, failures = handler.build_permission_bindings(
+            account=acct,
+            configuration=cfg,
+            identity_center=ic,
+            permission=handler.Permission(name="tpl", groups=["G1"]),
+        )
+        assert not failures
+        assert {b.permission_set_name for b in bindings} == {"PS1", "PS2"}
+        assert all(b.template_name == "tpl" for b in bindings)
+
+    def test_builds_expected_bindings_across_multiple_tagged_accounts(self):
+        accounts = [
+            handler.Account(
+                id="111111111111",
+                name="a1",
+                tags={"x/tpl": "G1,G2"},
+                organizational_unit_path="r-root/ou-1",
+            ),
+            handler.Account(
+                id="222222222222",
+                name="a2",
+                tags={"x/tpl": "G2"},
+                organizational_unit_path="r-root/ou-2",
+            ),
+        ]
+        cfg = _ConfigStub(
+            templates={"tpl": handler.Template(permission_sets=["PS1", "PS2"])}
+        )
+        ic = _IdentityCenterStub(
+            groups={"G1": "g1", "G2": "g2"},
+            permission_sets={"PS1": "arn:ps1", "PS2": "arn:ps2"},
+        )
+
+        all_bindings: list[handler.Binding] = []
+        all_failures: list[dict[str, object]] = []
+        for acct in accounts:
+            for permission in acct.get_permission_tags("x"):
+                bindings, _successes, failures = handler.build_permission_bindings(
+                    account=acct,
+                    configuration=cfg,
+                    identity_center=ic,
+                    permission=permission,
+                )
+                all_bindings.extend(bindings)
+                all_failures.extend(failures)
+
+        assert not all_failures
+        assert len(all_bindings) == 2 * 2  # 2 accounts * 2 permission sets
+        assert {b.account_id for b in all_bindings} == {"111111111111", "222222222222"}
+        assert {b.template_name for b in all_bindings} == {"tpl"}
+        assert {b.permission_set_name for b in all_bindings} == {"PS1", "PS2"}
+        # Account 1 bindings should contain both groups
+        acct1_groups = [
+            {g.name for g in b.groups}
+            for b in all_bindings
+            if b.account_id == "111111111111"
+        ]
+        assert all(gs == {"G1", "G2"} for gs in acct1_groups)
+        # Account 2 bindings should contain only G2
+        acct2_groups = [
+            {g.name for g in b.groups}
+            for b in all_bindings
+            if b.account_id == "222222222222"
+        ]
+        assert all(gs == {"G2"} for gs in acct2_groups)
+
+    def test_records_failures_across_accounts_for_missing_template_group_and_permission_set(
+        self,
+    ):
+        accounts = [
+            # Missing template
+            handler.Account(
+                id="1",
+                name="a1",
+                tags={"x/missing": "G1"},
+                organizational_unit_path="r-root/ou-1",
+            ),
+            # Missing group referenced in tag
+            handler.Account(
+                id="2",
+                name="a2",
+                tags={"x/tpl": "MissingGroup,G1"},
+                organizational_unit_path="r-root/ou-2",
+            ),
+            # Missing permission set referenced by template
+            handler.Account(
+                id="3",
+                name="a3",
+                tags={"x/tpl_missing_ps": "G1"},
+                organizational_unit_path="r-root/ou-3",
+            ),
+        ]
+        cfg = _ConfigStub(
+            templates={
+                "tpl": handler.Template(permission_sets=["PS1"]),
+                "tpl_missing_ps": handler.Template(
+                    permission_sets=["MissingPS", "PS1"]
+                ),
+            }
+        )
+        ic = _IdentityCenterStub(
+            groups={"G1": "g1"}, permission_sets={"PS1": "arn:ps1"}
+        )
+
+        all_bindings: list[handler.Binding] = []
+        all_failures: list[dict[str, object]] = []
+        for acct in accounts:
+            for permission in acct.get_permission_tags("x"):
+                bindings, _successes, failures = handler.build_permission_bindings(
+                    account=acct,
+                    configuration=cfg,
+                    identity_center=ic,
+                    permission=permission,
+                )
+                all_bindings.extend(bindings)
+                all_failures.extend(failures)
+
+        # We should still have bindings for account 2 (G1) and account 3 (PS1)
+        assert {b.account_id for b in all_bindings} == {"2", "3"}
+        assert all(b.permission_set_name == "PS1" for b in all_bindings)
+
+        assert any(
+            f.get("account_id") == "1"
+            and f.get("permission") == "missing"
+            and f.get("error") == "Permission template not found in configuration"
+            for f in all_failures
+        )
+        assert any(
+            f.get("account_id") == "2"
+            and f.get("permission") == "tpl"
+            and f.get("group") == "MissingGroup"
+            and f.get("error") == "Group not found in identity store"
+            for f in all_failures
+        )
+        assert any(
+            f.get("account_id") == "3"
+            and f.get("permission") == "MissingPS"
+            and f.get("error") == "Permission set not found in identity store"
+            for f in all_failures
+        )
+
+
+class TestBuildAccountBindings:
+    def test_returns_empty_when_no_account_templates(self):
+        acct = handler.Account(
+            id="1", name="a", tags={}, organizational_unit_path="r-root/ou-1"
+        )
+        cfg = _ConfigStub(
+            templates={"tpl": handler.Template(permission_sets=["PS1"])},
+            account_templates={},
+        )
+        ic = _IdentityCenterStub(
+            groups={"G1": "g1"}, permission_sets={"PS1": "arn:ps1"}
+        )
+
+        bindings, successes, failures = handler.build_account_bindings(
+            account=acct,
+            configuration=cfg,
+            identity_center=ic,
+        )
+        assert not bindings
+        assert not successes
+        assert not failures
+
+    def test_skips_when_matcher_does_not_match(self):
+        acct = handler.Account(
+            id="1", name="dev-app", tags={}, organizational_unit_path="r-root/ou-dev"
+        )
+        cfg = _ConfigStub(
+            templates={"tpl": handler.Template(permission_sets=["PS1"])},
+            account_templates={
+                "prod": handler.AccountTemplate(
+                    name="prod",
+                    matcher=handler.AccountTemplateMatcher(name_pattern="prod-*"),
+                    template_names=["tpl"],
+                    groups=["G1"],
+                )
+            },
+        )
+        ic = _IdentityCenterStub(
+            groups={"G1": "g1"}, permission_sets={"PS1": "arn:ps1"}
+        )
+
+        bindings, successes, failures = handler.build_account_bindings(acct, cfg, ic)
+        assert not bindings
+        assert not successes
+        assert not failures
+
+    def test_builds_bindings_for_matching_template_and_multiple_template_refs(self):
+        acct = handler.Account(
+            id="1", name="prod-app", tags={}, organizational_unit_path="r-root/ou-prod"
+        )
+        cfg = _ConfigStub(
+            templates={
+                "tpl1": handler.Template(permission_sets=["PS1"]),
+                "tpl2": handler.Template(permission_sets=["PS2"]),
+            },
+            account_templates={
+                "prod": handler.AccountTemplate(
+                    name="prod",
+                    matcher=handler.AccountTemplateMatcher(name_pattern="prod-*"),
+                    template_names=["tpl1", "tpl2"],
+                    groups=["G1"],
+                )
+            },
+        )
+        ic = _IdentityCenterStub(
+            groups={"G1": "g1"},
+            permission_sets={"PS1": "arn:ps1", "PS2": "arn:ps2"},
+        )
+
+        bindings, _successes, failures = handler.build_account_bindings(acct, cfg, ic)
+        assert not failures
+        # One binding per referenced template's permission_sets -> 2 total
+        assert len(bindings) == 2
+        assert {b.template_name for b in bindings} == {"tpl1", "tpl2"}
+        assert {b.permission_set_name for b in bindings} == {"PS1", "PS2"}
+
+    def test_account_template_name_patterns_dot_star_matches_all_accounts(self):
+        # Mirrors a Terraform account template:
+        # baseline = { template_names=["platform"], groups=["Cloud Solutions"], excluded=[...],
+        #              matcher={ name_patterns=[".*"] } }
+        acct = handler.Account(
+            id="123456789012",
+            name="TestAccount",
+            tags={},
+            organizational_unit_path="r-root/ou-any",
+        )
+        cfg = _ConfigStub(
+            templates={"platform": handler.Template(permission_sets=["PS1"])},
+            account_templates={
+                "baseline": handler.AccountTemplate(
+                    name="baseline",
+                    matcher=handler.AccountTemplateMatcher(name_patterns=[".*"]),
+                    template_names=["platform"],
+                    groups=["Cloud Solutions"],
+                    excluded=["Management", "Audit", "LogArchive"],
+                    description="Every account receives the platform template",
+                )
+            },
+        )
+        ic = _IdentityCenterStub(
+            groups={"Cloud Solutions": "g-cloud-solutions"},
+            permission_sets={"PS1": "arn:ps1"},
+        )
+
+        bindings, successes, failures = handler.build_account_bindings(acct, cfg, ic)
+        assert not failures
+        assert not successes
+        assert len(bindings) == 1
+        assert bindings[0].account_id == "123456789012"
+        assert bindings[0].template_name == "platform"
+        assert bindings[0].permission_set_name == "PS1"
+        assert [g.name for g in bindings[0].groups] == ["Cloud Solutions"]
+
+    def test_excluded_filters_out_account_by_id(self):
+        acct = handler.Account(
+            id="111111111111",
+            name="prod-app",
+            tags={},
+            organizational_unit_path="r-root/ou-prod",
+        )
+        cfg = _ConfigStub(
+            templates={"tpl": handler.Template(permission_sets=["PS1"])},
+            account_templates={
+                "prod": handler.AccountTemplate(
+                    name="prod",
+                    matcher=handler.AccountTemplateMatcher(name_pattern="prod-*"),
+                    excluded=[r"^111111111111$"],
+                    template_names=["tpl"],
+                    groups=["G1"],
+                )
+            },
+        )
+        ic = _IdentityCenterStub(
+            groups={"G1": "g1"}, permission_sets={"PS1": "arn:ps1"}
+        )
+
+        bindings, successes, failures = handler.build_account_bindings(acct, cfg, ic)
+        assert not bindings
+        assert not successes
+        assert not failures
+
+    def test_excluded_filters_out_account_by_name(self):
+        acct = handler.Account(
+            id="999999999999",
+            name="prod-secret-app",
+            tags={},
+            organizational_unit_path="r-root/ou-prod",
+        )
+        cfg = _ConfigStub(
+            templates={"tpl": handler.Template(permission_sets=["PS1"])},
+            account_templates={
+                "prod": handler.AccountTemplate(
+                    name="prod",
+                    matcher=handler.AccountTemplateMatcher(name_pattern="prod-*"),
+                    excluded=[r"^prod-secret-.*$"],
+                    template_names=["tpl"],
+                    groups=["G1"],
+                )
+            },
+        )
+        ic = _IdentityCenterStub(
+            groups={"G1": "g1"}, permission_sets={"PS1": "arn:ps1"}
+        )
+
+        bindings, successes, failures = handler.build_account_bindings(acct, cfg, ic)
+        assert not bindings
+        assert not successes
+        assert not failures
+
+    def test_invalid_excluded_regex_is_reported_as_failure(self):
+        acct = handler.Account(
+            id="111111111111",
+            name="prod-app",
+            tags={},
+            organizational_unit_path="r-root/ou-prod",
+        )
+        cfg = _ConfigStub(
+            templates={"tpl": handler.Template(permission_sets=["PS1"])},
+            account_templates={
+                "prod": handler.AccountTemplate(
+                    name="prod",
+                    matcher=handler.AccountTemplateMatcher(name_pattern="prod-*"),
+                    excluded=[r"("],
+                    template_names=["tpl"],
+                    groups=["G1"],
+                )
+            },
+        )
+        ic = _IdentityCenterStub(
+            groups={"G1": "g1"}, permission_sets={"PS1": "arn:ps1"}
+        )
+
+        bindings, successes, failures = handler.build_account_bindings(acct, cfg, ic)
+        assert not bindings
+        assert not successes
+        assert len(failures) == 1
+        assert failures[0]["account.name"] == "prod-app"
+        assert failures[0]["account_template_name"] == "prod"
+        assert "Invalid excluded regex" in failures[0]["error"]
+
+    def test_propagates_failure_when_group_missing(self):
+        acct = handler.Account(
+            id="1", name="prod-app", tags={}, organizational_unit_path="r-root/ou-prod"
+        )
+        cfg = _ConfigStub(
+            templates={"tpl": handler.Template(permission_sets=["PS1"])},
+            account_templates={
+                "prod": handler.AccountTemplate(
+                    name="prod",
+                    matcher=handler.AccountTemplateMatcher(name_pattern="prod-*"),
+                    template_names=["tpl"],
+                    groups=["Missing", "G1"],
+                )
+            },
+        )
+        ic = _IdentityCenterStub(
+            groups={"G1": "g1"}, permission_sets={"PS1": "arn:ps1"}
+        )
+
+        bindings, successes, failures = handler.build_account_bindings(acct, cfg, ic)
+        assert not successes
+        assert len(failures) == 1
+        assert failures[0]["error"] == "Group not found in identity store"
+        assert failures[0]["group"] == "Missing"
+        assert failures[0]["permission"] == "tpl"
+        assert len(bindings) == 1
+        assert [g.name for g in bindings[0].groups] == ["G1"]
+
+    def test_propagates_failure_when_permission_set_missing(self):
+        acct = handler.Account(
+            id="1", name="prod-app", tags={}, organizational_unit_path="r-root/ou-prod"
+        )
+        cfg = _ConfigStub(
+            templates={
+                "tpl": handler.Template(permission_sets=["MissingPS", "PS1"]),
+            },
+            account_templates={
+                "prod": handler.AccountTemplate(
+                    name="prod",
+                    matcher=handler.AccountTemplateMatcher(name_pattern="prod-*"),
+                    template_names=["tpl"],
+                    groups=["G1"],
+                )
+            },
+        )
+        ic = _IdentityCenterStub(
+            groups={"G1": "g1"}, permission_sets={"PS1": "arn:ps1"}
+        )
+
+        bindings, successes, failures = handler.build_account_bindings(acct, cfg, ic)
+        assert not successes
+        assert any(
+            f.get("error") == "Permission set not found in identity store"
+            and f.get("permission") == "MissingPS"
+            for f in failures
+        )
+        assert len(bindings) == 1
+        assert bindings[0].permission_set_name == "PS1"
+
+
+class TestBindingCreationAcrossAccounts:
+    def test_lambda_handler_builds_expected_bindings_from_account_tags(self):
+        os.environ["DYNAMODB_CONFIG_TABLE"] = "cfg"
+        os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
+        os.environ["SSO_INSTANCE_ARN"] = "arn:i"
+        os.environ["SSO_ACCOUNT_TAG_PREFIX"] = "x"
+
+        accounts = [
+            handler.Account(
+                id="111111111111",
+                name="a1",
+                tags={"x/tpl": "G1,G2"},
+                organizational_unit_path="r-root/ou-1",
+            ),
+            handler.Account(
+                id="222222222222",
+                name="a2",
+                tags={"x/tpl": "G2"},
+                organizational_unit_path="r-root/ou-2",
+            ),
+        ]
+
+        class FakeConfig:
+            def __init__(self, table_name: str):
+                self.table_name = table_name
+                self.templates = {
+                    "tpl": handler.Template(permission_sets=["PS1", "PS2"])
+                }
+                self.account_templates = {}
+
+            def load(self) -> None:
+                return None
+
+        class FakeTracking:
+            def __init__(self, table_name: str):
+                self.table_name = table_name
+
+        class FakeIdentityCenter:
+            def __init__(self, instance_arn: str):
+                self.instance_arn = instance_arn
+
+            def has_group(self, group_name: str) -> bool:
+                return group_name in {"G1", "G2"}
+
+            def get_group(self, group_name: str) -> handler.Group:
+                return handler.Group(name=group_name, id=f"id-{group_name}")
+
+            def get_permission_set(self, name: str) -> handler.PermissionSet | None:
+                if name not in {"PS1", "PS2"}:
+                    return None
+                return handler.PermissionSet(name=name, arn=f"arn:{name}")
+
+        class FakeOrgs:
+            def list_accounts(self) -> list[handler.Account]:
+                return accounts
+
+        captured: dict[str, object] = {}
+
+        def fake_reconcile_creations(
+            *, bindings, **_kwargs
+        ):  # pylint: disable=unused-argument
+            captured["bindings"] = bindings
+            return [], []
+
+        with (
+            patch.object(handler, "Configuration", FakeConfig),
+            patch.object(handler, "Tracking", FakeTracking),
+            patch.object(handler, "IdentityCenter", FakeIdentityCenter),
+            patch.object(handler, "Organizations", FakeOrgs),
+            patch.object(
+                handler, "reconcile_creations", side_effect=fake_reconcile_creations
+            ) as mock_reconcile,
+            patch.object(handler, "reconcile_deletions", return_value=([], [])),
+        ):
+            out = handler.lambda_handler({"source": "cron_schedule"}, None)
+
+        assert out["status"] == "success"
+        mock_reconcile.assert_called_once()
+
+        bindings = captured["bindings"]
+        assert bindings, "Expected bindings to be created"
+
+        # Expect one Binding per account per permission set.
+        assert len(bindings) == 4
+        by_account = {}
+        for b in bindings:
+            by_account.setdefault(b.account_id, []).append(b)
+
+        assert {b.permission_set_name for b in by_account["111111111111"]} == {
+            "PS1",
+            "PS2",
+        }
+        assert {b.permission_set_name for b in by_account["222222222222"]} == {
+            "PS1",
+            "PS2",
+        }
+
+        # Groups resolved from tag values.
+        a1_groups = {g.name for g in by_account["111111111111"][0].groups}
+        a2_groups = {g.name for g in by_account["222222222222"][0].groups}
+        assert a1_groups == {"G1", "G2"}
+        assert a2_groups == {"G2"}
+
+        # Template name propagated.
+        assert all(b.template_name == "tpl" for b in bindings)

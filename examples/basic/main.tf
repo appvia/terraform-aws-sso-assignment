@@ -8,15 +8,116 @@ locals {
     Product     = "Identity"
   }
 
-  ## Permission-set templates. Each top-level key becomes `sso/<key>` on a member
-  ## account; the tag value is a comma-separated list of Identity Center **group
-  ## display names** that receive that template’s permission sets on that account.
-  groups_configuration = {
-    default = {
-      permission_sets = ["Support"]
-      description     = "Used to assign the support permission set"
+  ## SSO Configuration with templates and account-level template matchers
+  ##
+  ## Templates: Define permission sets grouped by template name
+  ## Each template can be referenced by:
+  ## 1. Account tags: {prefix}/{template_name} (e.g., sso/administrators)
+  ## 2. Account templates: Auto-apply based on account conditions
+  ##
+  ## Account Templates: Auto-provision accounts matching specific conditions
+  ## Conditions use logical AND (all specified conditions must match):
+  ## - organizational_units: Match by OU trailing path with glob patterns
+  ## - name_pattern: Match by account name with glob pattern
+  ## - account_tags: Match by account tags (all must exist and match)
+  configuration = {
+    templates = {
+      administrators = {
+        description = "Provides full administrative permissions to the account"
+        permission_sets = [
+          "Administrator",
+        ]
+      }
+      billing = {
+        description = "Provides billing permissions to the account"
+        permission_sets = [
+          "BillingViewer",
+        ]
+      }
+      data = {
+        description = "Provides data engineering permissions to the account"
+        permission_sets = [
+          "DataEngineer",
+        ]
+      }
+      finops = {
+        description = "Provides finops permissions to the account"
+        permission_sets = [
+          "FinOpsEngineer",
+        ]
+      }
+      lz-support = {
+        description = "Provides support and landing zone permissions to the account"
+        permission_sets = [
+          "LandingZoneSupport",
+        ]
+      }
+      platform = {
+        description = "Provides support and platform engineering permissions to the account"
+        permission_sets = [
+          "Support",
+        ]
+      }
+      security = {
+        description = "Provides security permissions to the account"
+        permission_sets = [
+          "SecurityAuditor",
+        ]
+      }
+    }
+
+    account_templates = {
+      ## Example 1: Auto-provision production accounts by OU path
+      "baseline" = {
+        description    = "Every account receives the platform template"
+        template_names = ["platform"]
+        groups         = ["Cloud Solutions"]
+        excluded       = ["Management", "Audit", "LogArchive"]
+
+        matcher = {
+          name_patterns = [".*"]
+        }
+      }
+
+      "data-platform" = {
+        description    = "Used to provision data engineering roles"
+        template_names = ["data"]
+        groups         = ["Cloud Data Engineers"]
+
+        matcher = {
+          organizational_units = ["/data/*"]
+        }
+      }
+
+      "finops" = {
+        description    = "Used to provision the permission for finops engineering roles"
+        template_names = ["finops"]
+        groups         = ["Cloud Billing"]
+
+        matcher = {
+          name_patterns = ["FinOps"]
+        }
+      }
+
+      ## Example 3: Auto-provision accounts by tags (logical AND)
+      # This would match any account that has BOTH tags:
+      # - Environment = "Development"
+      # - ManagedBySSO = "true"
+      # (Uncomment to enable)
+      # "dev-by-tags" = {
+      #   description = "Auto-provision development accounts by tags"
+      #   matcher = {
+      #     account_tags = {
+      #       Environment = "Development"
+      #       ManagedBySSO = "true"
+      #     }
+      #   }
+      #   template_names = ["developers"]
+      #   groups         = ["DevEngineers"]
+      # }
     }
   }
+
   # Replace with your actual SSO instance ARN
   # Find this in AWS SSO console or via: aws sso-admin list-instances
   sso_instance_arn = "arn:aws:sso:::instance/ssoins-75351008b92ccaec"
@@ -40,8 +141,8 @@ module "sso_assignment" {
 module "config" {
   source = "../../modules/config"
 
-  dynamodb_table_name  = module.sso_assignment.dynamodb_table_name
-  groups_configuration = local.groups_configuration
+  dynamodb_table_name = module.sso_assignment.dynamodb_table_name
+  configuration       = local.configuration
 
   depends_on = [
     module.sso_assignment

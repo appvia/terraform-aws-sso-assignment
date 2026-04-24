@@ -1,6 +1,9 @@
-output "items_created" {
+output "configuration" {
   description = "Count of DynamoDB items created for group configurations"
-  value       = length(aws_dynamodb_table_item.group_configurations)
+  value = {
+    account_templates = try(var.configuration.account_templates, null)
+    templates         = try(var.configuration.templates, null)
+  }
 }
 
 output "table_arn" {

@@ -1,12 +1,20 @@
 ## DynamoDB table for storing SSO group to permission set mappings
+## Uses composite key: group_name (hash) + type (range) to support multiple item types
+## (templates and account_templates) with the same name
 resource "aws_dynamodb_table" "config" {
   billing_mode = var.dynamodb_billing_mode
   hash_key     = "group_name"
+  range_key    = "type"
   name         = format("%s-config", var.name)
   tags         = local.tags
 
   attribute {
     name = "group_name"
+    type = "S"
+  }
+
+  attribute {
+    name = "type"
     type = "S"
   }
 }
@@ -34,7 +42,7 @@ module "lambda" {
   function_name = var.name
   memory_size   = var.lambda_memory
   function_tags = var.tags
-  description   = "Lambda function for SSO group assignment"
+  description   = "Lambda function used for the automation of SSO assignments based on templates and account tagging"
   handler       = "handler.lambda_handler"
   runtime       = var.lambda_runtime
   timeout       = var.lambda_timeout

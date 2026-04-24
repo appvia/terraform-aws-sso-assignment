@@ -1,3 +1,8 @@
+output "configuration" {
+  description = "Configurtation for the assignment module, including counts of DynamoDB items created for group configurations and account templates"
+  value       = module.config.configuration
+}
+
 output "dynamodb_table_arn" {
   description = "ARN of the DynamoDB configuration table"
   value       = module.sso_assignment.dynamodb_table_arn
