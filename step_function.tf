@@ -1,6 +1,24 @@
 locals {
   ## Base states for the Step Function state machine
   base_states = {
+    NormalizePipeBatchInput = {
+      Type = "Choice"
+      Choices = [
+        {
+          Variable  = "$[0]"
+          IsPresent = true
+          Next      = "UnwrapPipeBatch"
+        }
+      ]
+      Default = "DetermineExecutionMode"
+    }
+
+    UnwrapPipeBatch = {
+      Type      = "Pass"
+      InputPath = "$[0]"
+      Next      = "DetermineExecutionMode"
+    }
+
     DetermineExecutionMode = {
       Type = "Choice"
       Choices = [
@@ -90,7 +108,7 @@ locals {
   ## The definition of the Step Function state machine
   step_function_definition = jsonencode({
     Comment = "Used to orchestrate the SSO group assignment workflow"
-    StartAt = "DetermineExecutionMode"
+    StartAt = "NormalizePipeBatchInput"
     States  = local.all_states
   })
 }

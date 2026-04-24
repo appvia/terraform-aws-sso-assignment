@@ -2,11 +2,13 @@
 ## Uses composite key: group_name (hash) + type (range) to support multiple item types
 ## (templates and account_templates) with the same name
 resource "aws_dynamodb_table" "config" {
-  billing_mode = var.dynamodb_billing_mode
-  hash_key     = "group_name"
-  range_key    = "type"
-  name         = format("%s-config", var.name)
-  tags         = local.tags
+  billing_mode     = var.dynamodb_billing_mode
+  hash_key         = "group_name"
+  name             = format("%s-config", var.name)
+  range_key        = "type"
+  stream_enabled   = var.enable_config_triggers
+  stream_view_type = "NEW_AND_OLD_IMAGES"
+  tags             = local.tags
 
   attribute {
     name = "group_name"
@@ -95,9 +97,27 @@ resource "aws_iam_role" "eventbridge" {
   tags               = local.tags
 }
 
+## Provision a IAM role for the EventBridge Pipes
+resource "aws_iam_role" "eventbridge_pipes" {
+  count = var.enable_config_triggers ? 1 : 0
+
+  assume_role_policy = data.aws_iam_policy_document.eventbridge_pipes_assume_role.json
+  name               = format("%s-eventbridge-pipes", var.name)
+  tags               = local.tags
+}
+
+## Attach policy to EventBridge Pipes role
+resource "aws_iam_role_policy" "eventbridge_pipes_policy" {
+  count = var.enable_config_triggers ? 1 : 0
+
+  name   = format("%s-eventbridge-pipes", var.name)
+  role   = aws_iam_role.eventbridge_pipes[0].id
+  policy = data.aws_iam_policy_document.eventbridge_pipes_policy.json
+}
+
 ## Provide the EventBridge role the ability to invoke the Step Function
 resource "aws_iam_role_policy" "eventbridge_step_function" {
-  name   = "sso-assignment-eventbridge-step-function"
+  name   = format("%s-eventbridge-step-function", var.name)
   role   = aws_iam_role.eventbridge.id
   policy = data.aws_iam_policy_document.eventbridge_invoke_step_function.json
 }
@@ -130,19 +150,40 @@ resource "aws_cloudwatch_event_rule" "account_creation" {
 }
 
 ## Provision an event to trigger the Lambda function when a tracking in the config table is updated
-resource "aws_cloudwatch_event_rule" "config_update" {
-  description = "Used to trigger the SSO assignment Lambda function when a tracking in the config table is updated"
+## Using EventBridge Pipes for reliable DynamoDB stream-based triggering
+resource "aws_pipes_pipe" "config_update" {
+  count = var.enable_config_triggers ? 1 : 0
+
   name        = format("%s-config-update", var.name)
-  state       = "ENABLED"
+  description = "EventBridge Pipe to trigger SSO assignment when config table is updated"
+  role_arn    = aws_iam_role.eventbridge_pipes[0].arn
+  source      = aws_dynamodb_table.config.stream_arn
+  target      = aws_sfn_state_machine.main.arn
   tags        = local.tags
 
-  event_pattern = jsonencode({
-    source      = ["aws.dynamodb"]
-    detail-type = ["Table Update"]
-    detail = {
-      tableName = [aws_dynamodb_table.config.name]
+  source_parameters {
+    dynamodb_stream_parameters {
+      starting_position = "LATEST"
+      batch_size        = 1
+      # Explicitly set these to avoid provider/default update bugs and satisfy
+      # AWS validation constraints.
+      maximum_record_age_in_seconds      = -1
+      maximum_batching_window_in_seconds = 0
     }
-  })
+  }
+  target_parameters {
+    step_function_state_machine_parameters {
+      invocation_type = "FIRE_AND_FORGET"
+    }
+    input_template = jsonencode({
+      account_id = "$.detail.requestParameters.accountId"
+      region     = "$.detail.awsRegion"
+      source     = "config_update"
+      time       = "$.detail.eventTime"
+    })
+  }
+
+  depends_on = [aws_iam_role_policy.eventbridge_pipes_policy]
 }
 
 ## Provision a EventBridge rule for the AWS Organizations account creation events
