@@ -23,6 +23,7 @@ output "eventbridge_rule_arns" {
   value = {
     account_creation = aws_cloudwatch_event_rule.account_creation.arn
     cron_schedule    = aws_cloudwatch_event_rule.cron_schedule.arn
+    config_update    = try(aws_pipes_pipe.config_update[0].arn, null)
   }
 }
 

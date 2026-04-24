@@ -37,6 +37,12 @@ variable "dynamodb_billing_mode" {
   }
 }
 
+variable "enable_config_triggers" {
+  description = "Enable EventBridge Pipes to trigger Lambda when config table is updated"
+  type        = bool
+  default     = true
+}
+
 variable "lambda_memory" {
   description = "Lambda function memory allocation in MB"
   type        = number
@@ -62,13 +68,13 @@ variable "lambda_runtime" {
 variable "lambda_schedule" {
   description = "EventBridge cron/rate schedule for Lambda execution"
   type        = string
-  default     = "rate(10 minutes)"
+  default     = "rate(60 minutes)"
 }
 
 variable "lambda_timeout" {
   description = "Lambda function timeout in seconds"
   type        = number
-  default     = 60
+  default     = 300
 
   validation {
     condition     = var.lambda_timeout >= 3 && var.lambda_timeout <= 900

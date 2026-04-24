@@ -86,3 +86,46 @@ data "aws_iam_policy_document" "eventbridge_assume_role" {
   }
 }
 
+## Craft assume role policy for EventBridge Pipes
+data "aws_iam_policy_document" "eventbridge_pipes_assume_role" {
+  statement {
+    sid    = "AllowPipesToAssumeRole"
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["pipes.amazonaws.com"]
+    }
+    actions = [
+      "sts:AssumeRole"
+    ]
+  }
+}
+
+## Craft IAM policy for EventBridge Pipes to read from DynamoDB Streams and invoke targets
+data "aws_iam_policy_document" "eventbridge_pipes_policy" {
+  statement {
+    sid    = "AllowReadFromDynamoDBStream"
+    effect = "Allow"
+    actions = [
+      "dynamodb:GetRecords",
+      "dynamodb:GetShardIterator",
+      "dynamodb:DescribeStream",
+      "dynamodb:ListStreams",
+      "dynamodb:ListShards"
+    ]
+    resources = [
+      "${aws_dynamodb_table.config.arn}/stream/*"
+    ]
+  }
+
+  statement {
+    sid    = "AllowInvokeStepFunction"
+    effect = "Allow"
+    actions = [
+      "states:StartExecution"
+    ]
+    resources = [aws_sfn_state_machine.main.arn]
+  }
+}
+
+
