@@ -797,7 +797,7 @@ class IdentityCenter:
             HandlerError: If the account assignment deletion fails
         """
 
-        logger.info(
+        logger.debug(
             "Deleting account assignment",
             extra={
                 "action": "delete_assignment",
@@ -918,7 +918,7 @@ class IdentityCenter:
         )
 
         if existing_assignment:
-            logger.info(
+            logger.debug(
                 "Account assignment already exists, skipping",
                 extra={
                     "action": "create_assignment",
@@ -930,7 +930,7 @@ class IdentityCenter:
             )
             return
 
-        logger.info(
+        logger.debug(
             "Account assignment does not exist, creating",
             extra={
                 "action": "create_assignment",
@@ -1152,7 +1152,7 @@ class Organizations:
         for _i in range(6):
             # Check in the cache for the current id - we should OU-ID/OU-ID etc
             if current_id in self._ou_path_cache:
-                logger.info(
+                logger.debug(
                     "Using cached organizational unit path",
                     extra={
                         "action": "get_account_organizational_path",
@@ -1244,7 +1244,7 @@ class Organizations:
             # Cache the path
             self._ou_path_cache[path] = base_path
             # Successfully cached the path
-            logger.info(
+            logger.debug(
                 "Added organizational path segment to the base path to the cache",
                 extra={
                     "action": "get_account_organizational_path",
@@ -1729,7 +1729,7 @@ def reconcile_deletions(
         # the assignment.
         for assignment in assignments:
             if not has_matching_binding(assignment, desired_bindings):
-                logger.info(
+                logger.debug(
                     "Deleting tracking assignment, no matching binding found for account",
                     extra={
                         "action": "reconcile_assignments",
@@ -1852,7 +1852,7 @@ def build_permission_bindings(
         )
         return [], successes, failures
 
-    logger.info(
+    logger.debug(
         "Found permission template",
         extra={
             "action": "build_bindings",
@@ -2033,7 +2033,7 @@ def build_account_bindings(
                 name=template_ref,
                 groups=template.groups,
             )
-            logger.info(
+            logger.debug(
                 "Building Permission object from account template",
                 extra={
                     "action": "build_account_bindings",
@@ -2052,7 +2052,7 @@ def build_account_bindings(
                 permission=permission,
             )
 
-            logger.info(
+            logger.debug(
                 "Built the following permission bindings",
                 extra={
                     "action": "build_account_bindings",
