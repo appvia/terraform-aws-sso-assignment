@@ -512,7 +512,7 @@ class AccountTemplate:
                 continue
             try:
                 if re.search(pattern, account.id) or re.search(pattern, account.name):
-                    logger.info(
+                    logger.debug(
                         "Account excluded by account template",
                         extra={
                             "action": "account_template_excluded",
@@ -890,7 +890,7 @@ class IdentityCenter:
             HandlerError: If the account assignment creation fails
         """
 
-        logger.info(
+        logger.debug(
             "Creating account assignment",
             extra={
                 "action": "create_assignment",
@@ -1065,7 +1065,7 @@ class Organizations:
             A list of Account objects
         """
 
-        logger.info(
+        logger.debug(
             "Listing accounts with the Organization",
             extra={
                 "action": "list_accounts",
@@ -1314,7 +1314,7 @@ class Organizations:
                 account_id=account.id
             )
             # Successfully got the account organizational unit path
-            logger.info(
+            logger.debug(
                 "Successfully got the account organizational unit path",
                 extra={
                     "action": "get_account",
@@ -1382,7 +1382,7 @@ class Tracking:
         assignments: list[Assignment] = []
 
         try:
-            logger.info(
+            logger.debug(
                 "Getting tracking assignments from tracking table",
                 extra={
                     "action": "list",
@@ -1471,7 +1471,7 @@ class Tracking:
         try:
             self.client.put_item(Item=asdict(tracked))
 
-            logger.info(
+            logger.debug(
                 "Recorded assignment in tracking table",
                 extra={
                     "action": "create",
@@ -1498,7 +1498,7 @@ class Tracking:
         assignment_id: str,
     ) -> None:
 
-        logger.info(
+        logger.debug(
             "Deleting tracking assignment from tracking table",
             extra={
                 "action": "delete",
@@ -1562,7 +1562,7 @@ def has_matching_binding(
         # Ensure the assignment is for a group that is in the binding
         for group in binding.groups:
             if assignment.principal_id == group.id:
-                logger.info(
+                logger.debug(
                     "Found matching binding",
                     extra={
                         "action": "has_matching_binding",
@@ -1707,7 +1707,7 @@ def reconcile_deletions(
         # Retrieve all active assignments from the tracking table
         assignments = tracking.list()
 
-        logger.info(
+        logger.debug(
             "Retrieved all tracking deletions from tracking table",
             extra={
                 "action": "reconcile_deletions",
@@ -1716,7 +1716,7 @@ def reconcile_deletions(
         )
         # If there are no assignments, we can return an empty list
         if len(assignments) == 0:
-            logger.info(
+            logger.debug(
                 "No tracking deletions to reconcile",
                 extra={
                     "action": "reconcile_deletions",
@@ -1785,7 +1785,7 @@ def reconcile_deletions(
 
                 # We need to delete the assignment from the tracking table
                 tracking.delete(assignment.assignment_id)
-                logger.info(
+                logger.debug(
                     "Deleted tracking assignment",
                     extra={
                         "action": "reconcile_assignments",
@@ -1867,7 +1867,7 @@ def build_permission_bindings(
 
     # Check all the groups exist in the identity store
     for group in permission.groups:
-        logger.info(
+        logger.debug(
             "Checking if group exists in Identity Center",
             extra={
                 "action": "build_bindings",
@@ -1897,7 +1897,7 @@ def build_permission_bindings(
             )
             continue
 
-        logger.info(
+        logger.debug(
             "Group found in Identity Center",
             extra={
                 "action": "build_permission_bindings",
@@ -1943,7 +1943,7 @@ def build_permission_bindings(
         )
         bindings.append(binding)
 
-    logger.info(
+    logger.debug(
         "Built the following permission bindings",
         extra={
             "action": "build_permission_bindings",
@@ -1990,7 +1990,7 @@ def build_account_bindings(
     for name, template in configuration.account_templates.items():
         # Check if account matches this template's matcher
         if not template.matcher.matches(account):
-            logger.info(
+            logger.debug(
                 "Account did not match account template, skipping",
                 extra={
                     "action": "build_account_bindings",
@@ -2015,7 +2015,7 @@ def build_account_bindings(
             )
             continue
 
-        logger.info(
+        logger.debug(
             "Found a matching account template for account",
             extra={
                 "action": "build_account_bindings",
@@ -2197,7 +2197,7 @@ def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
                     # Add the failures to the list
                     all_failures.extend(failures)
             else:
-                logger.info(
+                logger.debug(
                     "Skipping account as it has no permission tags",
                     extra={
                         "action": "lambda_handler",
