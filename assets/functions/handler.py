@@ -2109,11 +2109,14 @@ def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             "event": event,
         },
     )
-
     # Get the current UTC timestamp
     started_at = time.time()
 
     try:
+        # Get the logging level
+        logging_level = event.get("logging_level", "INFO")
+        # Set the logging level
+        logger.setLevel(logging_level.upper())
         # Ensure we have a valid environment
         validate_environment()
         # Initialize the configuration
