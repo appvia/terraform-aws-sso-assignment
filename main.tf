@@ -61,11 +61,11 @@ module "lambda" {
   ]
 
   environment_variables = {
-    ASSIGNMENT_EVENTS_SNS_TOPIC_ARN = var.events_sns_topic_arn
-    DYNAMODB_CONFIG_TABLE           = aws_dynamodb_table.config.name
-    DYNAMODB_TRACKING_TABLE         = aws_dynamodb_table.assignments_tracking.name
-    SSO_ACCOUNT_TAG_PREFIX          = var.sso_account_tag_prefix
-    SSO_INSTANCE_ARN                = var.sso_instance_arn
+    EVENTS_SNS_TOPIC_ARN    = var.events_sns_topic_arn
+    DYNAMODB_CONFIG_TABLE   = aws_dynamodb_table.config.name
+    DYNAMODB_TRACKING_TABLE = aws_dynamodb_table.assignments_tracking.name
+    SSO_ACCOUNT_TAG_PREFIX  = var.sso_account_tag_prefix
+    SSO_INSTANCE_ARN        = var.sso_instance_arn
   }
 
   ## Lambda Role
