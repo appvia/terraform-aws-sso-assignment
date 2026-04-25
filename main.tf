@@ -38,7 +38,7 @@ resource "aws_dynamodb_table" "assignments_tracking" {
 ## Lambda function for SSO group assignment using terraform-aws-modules/lambda/aws
 module "lambda" {
   source  = "terraform-aws-modules/lambda/aws"
-  version = "8.7.0"
+  version = "8.8.0"
 
   architectures = ["arm64"]
   function_name = var.name
