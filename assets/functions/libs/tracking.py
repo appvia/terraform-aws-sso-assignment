@@ -111,7 +111,6 @@ class Tracking:
         principal_type: str,
         template_name: str,
         group_name: str,
-        dry_run: bool = False,
     ) -> None:
         """
         Record a new assignment in the tracking table.
@@ -130,16 +129,6 @@ class Tracking:
         Raises:
             HandlerError: If the assignment creation fails
         """
-
-        if dry_run:
-            logger.debug(
-                "Dry run mode, skipping assignment creation",
-                extra={
-                    "action": "create",
-                    "account_id": account_id,
-                },
-            )
-            return
 
         # Get the assignment ID
         assignment_id = self.get_assignment_id(

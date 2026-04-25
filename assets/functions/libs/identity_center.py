@@ -268,7 +268,6 @@ class IdentityCenter:
         permission_set_name: str,
         principal_id: str,
         principal_type: str,
-        dry_run: bool = False,
     ) -> None:
         """
         Delete a permission set assignment and wait for completion.
@@ -298,17 +297,6 @@ class IdentityCenter:
                 "principal_type": principal_type,
             },
         )
-        # Check if running in dry run mode
-        if dry_run:
-            logger.debug(
-                "Dry run mode, skipping assignment deletion",
-                extra={
-                    "action": "delete_assignment",
-                    "account_id": account_id,
-                },
-            )
-            return
-
         # Initiate the deletion
         resp = self.client.delete_account_assignment(
             InstanceArn=self.instance_arn,
@@ -373,7 +361,6 @@ class IdentityCenter:
         permission_set_name: str,
         principal_type: str,
         principal_id: str,
-        dry_run: bool = False,
     ) -> None:
         """
         Create an account assignment with Identity Center
@@ -396,7 +383,6 @@ class IdentityCenter:
             extra={
                 "action": "create_assignment",
                 "account_id": account_id,
-                "dry_run": dry_run,
                 "instance_arn": self.instance_arn,
                 "permission_set_arn": permission_set_arn,
                 "permission_set_name": permission_set_name,
@@ -445,21 +431,6 @@ class IdentityCenter:
                 "principal_type": principal_type,
             },
         )
-
-        if dry_run:
-            logger.debug(
-                "Dry run mode, skipping assignment creation",
-                extra={
-                    "action": "create_assignment",
-                    "account_id": account_id,
-                    "instance_arn": self.instance_arn,
-                    "principal_id": principal_id,
-                    "principal_type": principal_type,
-                    "permission_set_arn": permission_set_arn,
-                    "permission_set_name": permission_set_name,
-                },
-            )
-            return
 
         # Assign the permission set to the principal in the target account
         resp = self.client.create_account_assignment(

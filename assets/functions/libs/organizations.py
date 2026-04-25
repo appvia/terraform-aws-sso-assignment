@@ -128,8 +128,8 @@ class Organizations:
         parents = resp.get("Parents", [])
         # If there are no parents, return an empty path
         if not parents:
-            logger.debug(
-                "No parents found for account",
+            logger.warning(
+                "No parents found for account, returning empty path",
                 extra={
                     "action": "get_account_organizational_path",
                     "account_id": account_id,
@@ -145,13 +145,6 @@ class Organizations:
         base_path = ""
         # If the parent is the root, no OU path exists
         if parent_type == "ROOT":
-            logger.debug(
-                "Account is a root account, no OU path exists",
-                extra={
-                    "action": "get_account_organizational_path",
-                    "account_id": account_id,
-                },
-            )
             return base_path
 
         # Walk up OU parents until ROOT
@@ -162,52 +155,16 @@ class Organizations:
         for _i in range(6):
             # Check in the cache for the current id - we should OU-ID/OU-ID etc
             if current_id in self._ou_path_cache:
-                logger.debug(
-                    "Using cached organizational unit path",
-                    extra={
-                        "action": "get_account_organizational_path",
-                        "account_id": account_id,
-                        "cached_path": self._ou_path_cache[current_id],
-                    },
-                )
                 return self._ou_path_cache[current_id]
 
             # Add the current id to the accumulated organizational unit ids
             paths.append(current_id)
-
-            logger.debug(
-                "Getting account organizational unit path",
-                extra={
-                    "action": "get_account_organizational_path",
-                    "account_id": account_id,
-                    "current_id": current_id,
-                    "paths": paths,
-                },
-            )
-
             # List the parents for the current id
             resp = self.client.list_parents(ChildId=current_id)
             # Get the parents
             parents = resp.get("Parents", [])
-            logger.debug(
-                "Got parents for the current id",
-                extra={
-                    "action": "get_account_organizational_path",
-                    "account_id": account_id,
-                    "current_id": current_id,
-                    "parents": parents,
-                },
-            )
             # No more parents, break
             if not parents:
-                logger.debug(
-                    "No more parents, breaking",
-                    extra={
-                        "action": "get_account_organizational_path",
-                        "account_id": account_id,
-                        "current_id": current_id,
-                    },
-                )
                 break
             # Get the parent type
             parent_type = parents[0].get("Type", None)
@@ -215,15 +172,6 @@ class Organizations:
             parent_id = parents[0].get("Id", None)
             # If the parent type is ROOT, break
             if parent_type == "ROOT" or parent_id is None or parent_type is None:
-                logger.debug(
-                    "Parent type is ROOT, breaking",
-                    extra={
-                        "action": "get_account_organizational_path",
-                        "account_id": account_id,
-                        "parent_type": parent_type,
-                        "parent_id": parent_id,
-                    },
-                )
                 break
 
             # If the parent type is ORGANIZATIONAL_UNIT or OU, set current id to parent id and continue
@@ -254,14 +202,6 @@ class Organizations:
             # Cache the path
             self._ou_path_cache[path] = base_path
             # Successfully cached the path
-            logger.debug(
-                "Added organizational path segment to the base path to the cache",
-                extra={
-                    "action": "get_account_organizational_path",
-                    "path": path,
-                    "base_path": base_path,
-                },
-            )
 
         return base_path
 

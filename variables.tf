@@ -74,7 +74,7 @@ variable "lambda_runtime" {
 variable "lambda_schedule" {
   description = "EventBridge cron/rate schedule for Lambda execution"
   type        = string
-  default     = "rate(60 minutes)"
+  default     = "rate(180 minutes)"
 }
 
 variable "lambda_timeout" {

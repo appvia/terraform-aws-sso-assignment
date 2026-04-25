@@ -99,7 +99,6 @@ class TestReconcileCreations:
             permission_set_name="PS1",
             principal_id="g-1",
             principal_type="GROUP",
-            dry_run=False,
         )
         tracking.create.assert_not_called()
         handler.events_publisher.publish.assert_not_called()
@@ -142,7 +141,6 @@ class TestReconcileCreations:
         identity_center.create_assignment.assert_called_once()
         tracking.create.assert_called_once_with(
             account_id="111111111111",
-            dry_run=False,
             group_name="G1",
             permission_set_arn="arn:ps1",
             permission_set_name="PS1",
@@ -218,7 +216,6 @@ class TestReconcileCreations:
             permission_set_name="PS1",
             principal_id="g-1",
             principal_type="GROUP",
-            dry_run=False,
         )
         identity_center.create_assignment.assert_any_call(
             account_id="111111111111",
@@ -226,7 +223,6 @@ class TestReconcileCreations:
             permission_set_name="PS1",
             principal_id="g-2",
             principal_type="GROUP",
-            dry_run=False,
         )
         identity_center.create_assignment.assert_any_call(
             account_id="222222222222",
@@ -234,13 +230,11 @@ class TestReconcileCreations:
             permission_set_name="PS2",
             principal_id="g-3",
             principal_type="GROUP",
-            dry_run=False,
         )
 
         assert tracking.create.call_count == 3
         tracking.create.assert_any_call(
             account_id="111111111111",
-            dry_run=False,
             group_name="G1",
             permission_set_arn="arn:ps1",
             permission_set_name="PS1",
@@ -250,7 +244,6 @@ class TestReconcileCreations:
         )
         tracking.create.assert_any_call(
             account_id="111111111111",
-            dry_run=False,
             group_name="G2",
             permission_set_arn="arn:ps1",
             permission_set_name="PS1",
@@ -260,7 +253,6 @@ class TestReconcileCreations:
         )
         tracking.create.assert_any_call(
             account_id="222222222222",
-            dry_run=False,
             group_name="G3",
             permission_set_arn="arn:ps2",
             permission_set_name="PS2",
@@ -271,7 +263,6 @@ class TestReconcileCreations:
 
         assert publisher.publish.call_count == 3
         publisher.publish.assert_any_call(
-            dry_run=False,
             event_type="AccountAssignmentCreated",
             detail={
                 "account_id": "111111111111",
@@ -283,7 +274,6 @@ class TestReconcileCreations:
             },
         )
         publisher.publish.assert_any_call(
-            dry_run=False,
             event_type="AccountAssignmentCreated",
             detail={
                 "account_id": "111111111111",
@@ -295,7 +285,6 @@ class TestReconcileCreations:
             },
         )
         publisher.publish.assert_any_call(
-            dry_run=False,
             event_type="AccountAssignmentCreated",
             detail={
                 "account_id": "222222222222",
@@ -396,7 +385,6 @@ class TestReconcileDeletions:
 
         identity_center.delete_assignment.assert_called_once_with(
             account_id="111111111111",
-            dry_run=False,
             permission_set_arn="arn:ps1",
             permission_set_name="PS1",
             principal_id="g-1",

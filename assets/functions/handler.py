@@ -121,18 +121,34 @@ def reconcile_creations(
         # Iterate over the groups in the binding
         for group in binding.groups:
             try:
+                # If running in dry run mode, skip the assignment creation
+                if dry_run:
+                    logger.info(
+                        "Dry run mode, skipping assignment creation",
+                        extra={
+                            "action": "assign_permissions",
+                            "account_id": binding.account_id,
+                            "group_name": group.name,
+                            "permission_set_name": binding.permission_set_name,
+                            "principal_id": group.id,
+                            "principal_type": "GROUP",
+                            "template_name": binding.template_name,
+                        },
+                    )
+                    continue
+
+                # Create the assignment in the identity center
                 identity_center.create_assignment(
                     account_id=binding.account_id,
                     permission_set_arn=binding.permission_set_arn,
                     permission_set_name=binding.permission_set_name,
                     principal_id=group.id,
                     principal_type="GROUP",
-                    dry_run=dry_run,
                 )
+
                 # Create the item in the tracking table
                 tracking.create(
                     account_id=binding.account_id,
-                    dry_run=dry_run,
                     group_name=group.name,
                     permission_set_arn=binding.permission_set_arn,
                     permission_set_name=binding.permission_set_name,
@@ -141,7 +157,6 @@ def reconcile_creations(
                     template_name=binding.template_name,
                 )
                 events_publisher.publish(
-                    dry_run=dry_run,
                     event_type="AccountAssignmentCreated",
                     detail={
                         "account_id": binding.account_id,
@@ -262,9 +277,24 @@ def reconcile_deletions(
                 )
                 try:
                     # Attempt to delete the assignment from the account
+                    if dry_run:
+                        logger.info(
+                            "Dry run mode, skipping assignment deletion",
+                            extra={
+                                "action": "reconcile_assignments",
+                                "account_id": assignment.account_id,
+                                "assignment_id": assignment.assignment_id,
+                                "group_name": assignment.group_name,
+                                "permission_set_name": assignment.permission_set_name,
+                                "principal_id": assignment.principal_id,
+                                "principal_type": assignment.principal_type,
+                                "template_name": assignment.template_name,
+                            },
+                        )
+                        continue
+
                     identity_center.delete_assignment(
                         account_id=assignment.account_id,
-                        dry_run=dry_run,
                         permission_set_arn=assignment.permission_set_arn,
                         permission_set_name=assignment.permission_set_name,
                         principal_id=assignment.principal_id,
@@ -335,6 +365,7 @@ def reconcile_deletions(
 
                 # We need to delete the assignment from the tracking table
                 tracking.delete(assignment.assignment_id)
+                # If not in dry run mode, delete the assignment from the tracking table
                 logger.debug(
                     "Deleted tracking assignment",
                     extra={
@@ -381,15 +412,6 @@ def build_permission_bindings(
     successes: list[dict[str, Any]] = []
     # Initialize the list to store the failures
     failures: list[dict[str, Any]] = []
-
-    logger.info(
-        "Building bindings from account permissions",
-        extra={
-            "action": "build_bindings",
-            "account_id": account.id,
-            "permission": permission,
-        },
-    )
 
     template = configuration.templates.get(permission.name)
     if not template:
@@ -664,6 +686,8 @@ def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
 
     try:
         global events_publisher  # pylint: disable=global-statement
+        # The source of the event
+        source = event.get("source", "unknown")
         # Get the AWS region
         aws_region = event.get("aws_region", os.environ.get("AWS_REGION", "eu-west-2"))
         # Get the logging level
@@ -678,9 +702,12 @@ def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             region_name=aws_region,
         )
         # Check if running in dry run mode
-        dry_run = event.get("dry_run", os.environ.get("ENABLE_DRY_RUN", "false").lower()) == "true"
+        dry_run = (
+            event.get("dry_run", os.environ.get("ENABLE_DRY_RUN", "false").lower())
+            == "true"
+        )
         if dry_run:
-            logger.debug(
+            logger.info(
                 "Dry run mode, all actions will be skipped",
                 extra={
                     "action": "lambda_handler",
@@ -839,6 +866,7 @@ def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             "Completed SSO group assignment run",
             extra={
                 "action": "lambda_handler",
+                "source": source,
                 "assignments_failed": len(all_failures),
                 "assignments_succeeded": len(all_successes),
                 "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -852,6 +880,7 @@ def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "started_at": started_at,
             "status": status,
+            "source": source,
             "results": {
                 "succeeded": all_successes,
                 "failed": all_failures,
