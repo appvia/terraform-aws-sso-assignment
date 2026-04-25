@@ -17,6 +17,7 @@ Use it when you want repeatable, infrastructure-as-code driven SSO assignments a
 - **Two trigger modes**: Scheduled reconciliation (default `rate(10 minutes)`) and organization account-creation events (CloudTrail on `CreateAccount`).
 - **Resilient orchestration**: Step Functions retries Lambda tasks (3 attempts, exponential backoff).
 - **Optional alerting**: If you set `sns_topic_arn`, failed runs can publish error details to your existing SNS topic.
+- **Optional event stream**: If you set `events_sns_topic_arn`, the Lambda publishes assignment lifecycle events (created/deleted) to your existing SNS topic.
 - **Flexible operations**: Tune Lambda memory, timeout, runtime, CloudWatch log retention, and DynamoDB billing mode.
 - **Packaged handler**: Python Lambda source lives under [`assets/functions/`](./assets/functions/) (JSON logging, unit tests alongside the handler).
 
@@ -238,6 +239,30 @@ terraform apply
 
 See [examples/basic/README.md](./examples/basic/README.md) for more detail.
 
+### Example 6 — Assignment lifecycle SNS events (created/deleted)
+
+To publish a generic event envelope for account assignment **creation** and **deletion**, provide an SNS topic ARN that already exists. This is **independent** of `sns_topic_arn` (Step Functions failure notifications).
+
+```hcl
+module "sso_assignment" {
+  source = "git::https://github.com/appvia/terraform-aws-sso-assignment.git"
+
+  sso_instance_arn = local.sso_instance_arn
+  sso_account_tag_prefix = "sso"
+
+  # Optional: publish lifecycle events (topic must already exist)
+  events_sns_topic_arn = aws_sns_topic.assignment_events.arn
+}
+```
+
+#### Event schema (SNS `Message`)
+
+The Lambda publishes JSON with:
+
+- `event_type`: `AccountAssignmentCreated` or `AccountAssignmentDeleted`
+- `timestamp`: ISO-8601 UTC timestamp
+- `detail`: metadata about the assignment (account, group/principal, permission set, template)
+
 ## Configuration
 
 ### Templates and Account Templates
@@ -414,7 +439,7 @@ aws stepfunctions describe-state-machine --state-machine-arn "$SF"
 
 ## IAM (high level)
 
-The module defines IAM for Lambda (DynamoDB read, SSO/Identity Store/Organizations APIs including `ListTagsForResource` on member accounts, logs), Step Functions (invoke Lambda, optional SNS publish), and EventBridge (start execution). Exact policies are in `data.tf` and `step_function.tf`.
+The module defines IAM for Lambda (DynamoDB read, SSO/Identity Store/Organizations APIs including `ListTagsForResource` on member accounts, logs, and optional `sns:Publish` when `assignment_events_sns_topic_arn` is set), Step Functions (invoke Lambda, optional SNS publish via `sns_topic_arn`), and EventBridge (start execution). Exact policies are in `data.tf` and `step_function.tf`.
 
 ## Troubleshooting
 
@@ -471,6 +496,7 @@ See [LICENSE](./LICENSE).
 | <a name="input_cloudwatch_logs_retention_in_days"></a> [cloudwatch\_logs\_retention\_in\_days](#input\_cloudwatch\_logs\_retention\_in\_days) | The number of days to retain the CloudWatch logs | `number` | `30` | no |
 | <a name="input_dynamodb_billing_mode"></a> [dynamodb\_billing\_mode](#input\_dynamodb\_billing\_mode) | DynamoDB billing mode (PAY\_PER\_REQUEST or PROVISIONED) | `string` | `"PAY_PER_REQUEST"` | no |
 | <a name="input_enable_config_triggers"></a> [enable\_config\_triggers](#input\_enable\_config\_triggers) | Enable EventBridge Pipes to trigger Lambda when config table is updated | `bool` | `true` | no |
+| <a name="input_events_sns_topic_arn"></a> [events\_sns\_topic\_arn](#input\_events\_sns\_topic\_arn) | Optional ARN of an existing SNS topic to publish assignment creation/deletion events from the Lambda (if null, event publishing disabled). This topic is NOT created by this module. | `string` | `null` | no |
 | <a name="input_lambda_memory"></a> [lambda\_memory](#input\_lambda\_memory) | Lambda function memory allocation in MB | `number` | `512` | no |
 | <a name="input_lambda_runtime"></a> [lambda\_runtime](#input\_lambda\_runtime) | Lambda function runtime | `string` | `"python3.14"` | no |
 | <a name="input_lambda_schedule"></a> [lambda\_schedule](#input\_lambda\_schedule) | EventBridge cron/rate schedule for Lambda execution | `string` | `"rate(60 minutes)"` | no |

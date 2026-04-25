@@ -68,6 +68,10 @@ groups_configuration = {
 - **DetermineExecutionMode**: Routes single-account vs. bulk processing
 - **Retry Logic**: 3 attempts with exponential backoff
 - **Error Handling**: Intelligent failure routing with optional SNS notifications
+
+### Assignment lifecycle events (optional SNS)
+
+The Lambda can also publish **assignment lifecycle events** (created/deleted) to an existing SNS topic when the root module input `assignment_events_sns_topic_arn` is set. This is **separate** from the Step Functions failure notification topic (`sns_topic_arn`).
 - **State Tracking**: Comprehensive execution logging
 
 ## Usage Patterns

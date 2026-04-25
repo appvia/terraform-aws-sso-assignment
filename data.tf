@@ -1,7 +1,7 @@
 ## Craft a IAM policy document for the Lambda function
 data "aws_iam_policy_document" "lambda_policy" {
   statement {
-    sid    = "AllowLambdaToReadDynamoDB"
+    sid    = "AllowDynamoDB"
     effect = "Allow"
     actions = [
       "dynamodb:GetItem",
@@ -14,8 +14,39 @@ data "aws_iam_policy_document" "lambda_policy" {
     ]
   }
 
+  dynamic "statement" {
+    for_each = var.events_sns_topic_arn != null ? [1] : []
+    content {
+      sid    = "AllowPublishAssignmentEventsToSNS"
+      effect = "Allow"
+      actions = [
+        "sns:Publish"
+      ]
+      resources = [var.events_sns_topic_arn]
+    }
+  }
+
   statement {
-    sid    = "AllowModifyTrackingTable"
+    sid    = "AllowIdentityStore"
+    effect = "Allow"
+    actions = [
+      "identitystore:DescribeGroup",
+      "identitystore:ListGroups",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "AllowIAM"
+    effect = "Allow"
+    actions = [
+      "iam:GetSAMLProvider"
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "AllowTrackingTable"
     effect = "Allow"
     actions = [
       "dynamodb:DeleteItem",
@@ -28,10 +59,9 @@ data "aws_iam_policy_document" "lambda_policy" {
   }
 
   statement {
-    sid    = "AllowLambdaToInvokeSSO"
+    sid    = "AllowSSO"
     effect = "Allow"
     actions = [
-      "identitystore:ListGroups",
       "sso:CreateAccountAssignment",
       "sso:DeleteAccountAssignment",
       "sso:DescribeAccountAssignment",
@@ -46,7 +76,7 @@ data "aws_iam_policy_document" "lambda_policy" {
   }
 
   statement {
-    sid    = "AllowLambdaToInvokeOrganizations"
+    sid    = "AllowOrganizations"
     effect = "Allow"
     actions = [
       "organizations:DescribeAccount",
@@ -125,6 +155,23 @@ data "aws_iam_policy_document" "eventbridge_pipes_policy" {
       "states:StartExecution"
     ]
     resources = [aws_sfn_state_machine.main.arn]
+  }
+
+  dynamic "statement" {
+    for_each = var.enable_config_triggers ? [1] : []
+    content {
+      sid    = "AllowWritePipeLogs"
+      effect = "Allow"
+      actions = [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+      ]
+      resources = [
+        aws_cloudwatch_log_group.eventbridge_pipes_config_update[0].arn,
+        "${aws_cloudwatch_log_group.eventbridge_pipes_config_update[0].arn}:*",
+      ]
+    }
   }
 }
 
