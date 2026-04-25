@@ -90,7 +90,7 @@ data "aws_iam_policy_document" "lambda_policy" {
 }
 
 ## Craft a IAM policy document for the EventBridge
-data "aws_iam_policy_document" "eventbridge_invoke_step_function" {
+data "aws_iam_policy_document" "eventbridge_invoke" {
   statement {
     sid    = "AllowEventBridgeToInvokeStepFunction"
     effect = "Allow"
@@ -159,6 +159,7 @@ data "aws_iam_policy_document" "eventbridge_pipes_policy" {
 
   dynamic "statement" {
     for_each = var.enable_config_triggers ? [1] : []
+
     content {
       sid    = "AllowWritePipeLogs"
       effect = "Allow"
@@ -174,5 +175,3 @@ data "aws_iam_policy_document" "eventbridge_pipes_policy" {
     }
   }
 }
-
-

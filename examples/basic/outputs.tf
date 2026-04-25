@@ -1,16 +1,16 @@
 output "configuration" {
-  description = "Configurtation for the assignment module, including counts of DynamoDB items created for group configurations and account templates"
+  description = "Configuration for the assignment module, including counts of DynamoDB items created for group configurations and account templates"
   value       = module.config.configuration
 }
 
 output "dynamodb_table_arn" {
   description = "ARN of the DynamoDB configuration table"
-  value       = module.sso_assignment.dynamodb_table_arn
+  value       = module.sso_assignment.config_dynamodb_table_arn
 }
 
 output "dynamodb_table_name" {
   description = "Name of the DynamoDB configuration table"
-  value       = module.sso_assignment.dynamodb_table_name
+  value       = module.sso_assignment.config_dynamodb_table_name
 }
 
 output "eventbridge_rule_arns" {

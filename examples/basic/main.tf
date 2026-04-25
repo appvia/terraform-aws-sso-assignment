@@ -141,7 +141,7 @@ module "sso_assignment" {
 module "config" {
   source = "../../modules/config"
 
-  dynamodb_table_name = module.sso_assignment.dynamodb_table_name
+  dynamodb_table_name = module.sso_assignment.config_dynamodb_table_name
   configuration       = local.configuration
 
   depends_on = [

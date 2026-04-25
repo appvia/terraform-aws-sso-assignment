@@ -43,6 +43,12 @@ variable "enable_config_triggers" {
   default     = true
 }
 
+variable "enable_dry_run" {
+  description = "When true, triggers run the Lambda in dry-run (noop) mode"
+  type        = bool
+  default     = false
+}
+
 variable "lambda_memory" {
   description = "Lambda function memory allocation in MB"
   type        = number

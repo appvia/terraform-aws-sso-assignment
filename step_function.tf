@@ -141,6 +141,7 @@ data "aws_iam_policy_document" "step_function_lambda" {
 
   dynamic "statement" {
     for_each = var.sns_topic_arn != null ? [1] : []
+
     content {
       sid    = "AllowStepFunctionToPublishToSNS"
       effect = "Allow"
@@ -152,21 +153,21 @@ data "aws_iam_policy_document" "step_function_lambda" {
   }
 }
 
-## Step Function IAM role
+## Provision a IAM role for the Step Function
 resource "aws_iam_role" "step_function" {
   name               = format("%s-step-function", var.name)
   tags               = local.tags
   assume_role_policy = data.aws_iam_policy_document.step_function_assume_role.json
 }
 
-## Lambda invocation policy for Step Function
+## Provide the Step Function role the ability to invoke the Lambda function
 resource "aws_iam_role_policy" "step_function_lambda" {
   name   = format("%s-step-function-lambda", var.name)
   role   = aws_iam_role.step_function.id
   policy = data.aws_iam_policy_document.step_function_lambda.json
 }
 
-## Step Function state machine
+## Provision a Step Function state machine
 resource "aws_sfn_state_machine" "main" {
   name       = var.name
   role_arn   = aws_iam_role.step_function.arn
@@ -177,4 +178,3 @@ resource "aws_sfn_state_machine" "main" {
     aws_iam_role_policy.step_function_lambda,
   ]
 }
-

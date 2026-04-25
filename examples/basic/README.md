@@ -105,7 +105,7 @@ No inputs.
 
 | Name | Description |
 |------|-------------|
-| <a name="output_configuration"></a> [configuration](#output\_configuration) | Configurtation for the assignment module, including counts of DynamoDB items created for group configurations and account templates |
+| <a name="output_configuration"></a> [configuration](#output\_configuration) | Configuration for the assignment module, including counts of DynamoDB items created for group configurations and account templates |
 | <a name="output_dynamodb_table_arn"></a> [dynamodb\_table\_arn](#output\_dynamodb\_table\_arn) | ARN of the DynamoDB configuration table |
 | <a name="output_dynamodb_table_name"></a> [dynamodb\_table\_name](#output\_dynamodb\_table\_name) | Name of the DynamoDB configuration table |
 | <a name="output_eventbridge_rule_arns"></a> [eventbridge\_rule\_arns](#output\_eventbridge\_rule\_arns) | ARNs of EventBridge rules |
