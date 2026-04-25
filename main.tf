@@ -204,7 +204,7 @@ resource "aws_pipes_pipe" "config_update" {
 
     input_template = jsonencode({
       account_id = "$.detail.requestParameters.accountId"
-      dry_run    = var.enable_dry_run
+      dry_run    = var.enable_dry_run ? "true" : "false"
       region     = "$.detail.awsRegion"
       source     = "config_update"
       time       = "$.detail.eventTime"
@@ -229,3 +229,4 @@ resource "aws_cloudwatch_event_target" "cron_schedule_target" {
   role_arn = aws_iam_role.eventbridge_invoke.arn
   rule     = aws_cloudwatch_event_rule.cron_schedule.name
 }
+

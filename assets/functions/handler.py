@@ -678,7 +678,7 @@ def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             region_name=aws_region,
         )
         # Check if running in dry run mode
-        dry_run = event.get("dry_run", os.environ.get("ENABLE_DRY_RUN", False))
+        dry_run = event.get("dry_run", os.environ.get("ENABLE_DRY_RUN", "false").lower()) == "true"
         if dry_run:
             logger.debug(
                 "Dry run mode, all actions will be skipped",
