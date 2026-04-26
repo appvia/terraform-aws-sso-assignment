@@ -1,6 +1,11 @@
-variable "dynamodb_table_name" {
-  description = "Name of the DynamoDB table for storing group configurations"
+variable "dynamodb_table_arn" {
+  description = "ARN of the DynamoDB table for storing configuration"
   type        = string
+
+  validation {
+    condition     = can(regex("^arn:aws:dynamodb:[^:]+:[^:]+:table/.+$", var.dynamodb_table_arn))
+    error_message = "dynamodb_table_arn must be a valid DynamoDB table ARN (arn:aws:dynamodb:{region}:{account_id}:table/{table_name})"
+  }
 }
 
 variable "configuration" {

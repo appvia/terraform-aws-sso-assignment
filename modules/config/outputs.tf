@@ -6,12 +6,12 @@ output "configuration" {
   }
 }
 
-output "table_arn" {
-  description = "ARN of the DynamoDB table"
-  value       = data.aws_dynamodb_table.config.arn
+output "dynamodb_table_name" {
+  description = "Name of the DynamoDB table where configurations are stored"
+  value       = local.table_name
 }
 
-output "table_name" {
-  description = "Name of the DynamoDB table"
-  value       = var.dynamodb_table_name
+output "dynamodb_table_arn" {
+  description = "ARN of the DynamoDB table where configurations are stored"
+  value       = var.dynamodb_table_arn
 }

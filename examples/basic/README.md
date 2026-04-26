@@ -1,15 +1,19 @@
 # Basic example
 
-This example deploys the root module plus `modules/config` with sample **permission-set templates**. Each key under `groups_configuration` (e.g. `default`, `finance`) is a **template name**; on each **member account** you set a tag `sso/<template_name>` whose **value** is a comma-separated list of **IAM Identity Center group display names** that should receive that template’s permission sets on that account. There is no `account_tag_filters` or legacy `account_tags` map on the configuration (those were removed).
+This example deploys the root module plus `modules/config` with sample **permission-set templates**.
+
+- **Templates** are defined under `local.configuration.templates` in `main.tf`.
+- **Member accounts** opt into templates using Organizations tags whose keys are `<prefix>/<template_name>`, where `<prefix>` is the root module input `sso_account_tag_prefix` (Terraform default is `"Grant"` unless you override it).
+- **Tag values** are a comma-separated list of **IAM Identity Center group display names** that should receive that template’s permission sets on that account.
 
 ## Overview
 
-The example defines four templates: `default`, `finance`, `security`, and `operations`. See `main.tf` for the exact permission set names. After apply, **tag your accounts** (e.g. in your account-vending pipeline) with keys like `sso/default` and values like `My-IC-Group,Another-IC-Group` so the Lambda can create assignments.
+The example defines multiple templates (see `main.tf` for the exact permission set names). After apply, **tag your accounts** (e.g. in your account-vending pipeline) with keys like `Grant/platform` and values like `My-IC-Group,Another-IC-Group` so the Lambda can create assignments.
 
 ## Prerequisites
 
 1. AWS Organizations with a management account that can tag member accounts and deploy the stack.
-2. IAM Identity Center enabled; permission sets and groups already exist; group **DisplayName** values must match the comma-separated names in your `sso/*` tag values.
+2. IAM Identity Center enabled; permission sets and groups already exist; group **DisplayName** values must match the comma-separated names in your `<prefix>/*` tag values.
 3. Terraform `>= 1.0` and the AWS provider as required by the module.
 
 Find your Identity Center instance ARN:
@@ -36,10 +40,10 @@ After deploy, set tags on each target account (12-digit account ID as resource i
 ```bash
 aws organizations tag-resource \
   --resource-id 123456789012 \
-  --tags Key=sso/default,Value=App-Developers,App-ReadOnly-Users
+  --tags Key=Grant/platform,Value=App-Developers,App-ReadOnly-Users
 ```
 
-Use `sso/<template_name>` for each key in `groups_configuration`. Wait for the scheduled run or start the Step Function (below).
+Use `<prefix>/<template_name>` for each key in `local.configuration.templates` (in this example `<prefix>` is `"Grant"` unless you change `sso_account_tag_prefix` on the root module). Wait for the scheduled run or start the Step Function (below).
 
 ## Verify
 
@@ -71,11 +75,11 @@ aws stepfunctions list-executions --state-machine-arn "$STEP_FUNCTION_ARN"
 
 ### Add a template
 
-Add an entry in `local.groups_configuration` in `main.tf` (e.g. `data_engineers` with `permission_sets` and `description`), apply, then use the tag `sso/data_engineers` on accounts with a comma-separated list of IC group display names.
+Add an entry in `local.configuration.templates` in `main.tf` (e.g. `data_engineers` with `permission_sets` and `description`), apply, then use the tag `<prefix>/data_engineers` on accounts with a comma-separated list of IC group display names.
 
 ### Tune the root module
 
-Pass through on `module "sso_assignment"` in `main.tf`, for example: `lambda_timeout`, `lambda_memory`, `lambda_schedule`, `sso_account_tag_prefix` (default `sso`), `sns_topic_arn` via the module block.
+Pass through on `module "sso_assignment"` in `main.tf`, for example: `lambda_timeout`, `lambda_memory`, `lambda_schedule`, `sso_account_tag_prefix` (default `"Grant"`), `sns_topic_arn` via the module block.
 
 **Notifications:** the root variable is `sns_topic_arn` (bring your own topic), not an email string.
 
@@ -90,7 +94,7 @@ terraform destroy
 - [AWS IAM Identity Center](https://docs.aws.amazon.com/singlesignon/)
 - [AWS Organizations tagging](https://docs.aws.amazon.com/organizations/latest/userguide/orgs_tagging.html)
 - [Step Functions](https://docs.aws.amazon.com/step-functions/)
-- [Repository README](../../README.md) for the full `sso/<template>` model
+- [Repository README](../../README.md) for the full `<prefix>/<template>` model
 
 <!-- BEGIN_TF_DOCS -->
 ## Providers

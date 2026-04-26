@@ -3,8 +3,10 @@
 resource "aws_dynamodb_table_item" "templates" {
   for_each = var.configuration.templates
 
-  hash_key  = "group_name"
-  range_key = "type"
+  hash_key   = "group_name"
+  range_key  = "type"
+  table_name = local.table_name
+
   item = jsonencode({
     group_name = {
       S = each.key
@@ -19,7 +21,6 @@ resource "aws_dynamodb_table_item" "templates" {
       SS = each.value.permission_sets
     }
   })
-  table_name = var.dynamodb_table_name
 }
 
 ## Create DynamoDB items for each account template matcher
@@ -27,8 +28,10 @@ resource "aws_dynamodb_table_item" "templates" {
 resource "aws_dynamodb_table_item" "account_templates" {
   for_each = var.configuration.account_templates
 
-  hash_key  = "group_name"
-  range_key = "type"
+  hash_key   = "group_name"
+  range_key  = "type"
+  table_name = local.table_name
+
   item = jsonencode(merge(
     {
       group_name = {
@@ -72,5 +75,4 @@ resource "aws_dynamodb_table_item" "account_templates" {
       }
     } : {}
   ))
-  table_name = var.dynamodb_table_name
 }

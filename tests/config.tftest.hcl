@@ -15,7 +15,7 @@ run "creates_items_for_templates_only" {
   }
 
   variables {
-    dynamodb_table_name = "lz-sso-config"
+    dynamodb_table_arn = "arn:aws:dynamodb:eu-west-2:123456789012:table/lz-sso-config"
     configuration = {
       templates = {
         default = {
@@ -42,12 +42,12 @@ run "creates_items_for_templates_only" {
   }
 
   assert {
-    condition     = output.table_name == "lz-sso-config"
+    condition     = output.dynamodb_table_name == "lz-sso-config"
     error_message = "Expected output.table_name to match the provided dynamodb_table_name."
   }
 
   assert {
-    condition     = output.table_arn == "arn:aws:dynamodb:eu-west-2:123456789012:table/lz-sso-config"
+    condition     = output.dynamodb_table_arn == "arn:aws:dynamodb:eu-west-2:123456789012:table/lz-sso-config"
     error_message = "Expected output.table_arn to be read from the DynamoDB table data source."
   }
 }
@@ -60,7 +60,7 @@ run "creates_items_for_account_templates" {
   }
 
   variables {
-    dynamodb_table_name = "lz-sso-config"
+    dynamodb_table_arn = "arn:aws:dynamodb:eu-west-2:123456789012:table/lz-sso-config"
     configuration = {
       templates = {
         prod = {

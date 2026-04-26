@@ -132,8 +132,21 @@ locals {
 module "sso_assignment" {
   source = "../.."
 
+  # Indicate dry run mode
+  enable_dry_run = true
+  # CloudWatch Logs retention in days
+  cloudwatch_logs_retention_in_days = 7
+  # Enable server-side encryption for DynamoDB tables (default is false)
+  dynamodb_encryption_enabled = true
+  # Enable EventBridge Pipes to trigger Lambda when config table is updated (defaults to true)
+  enable_config_triggers = true
+  # Optional: Set to SNS topic ARN to receive notifications (null = disabled)
   sns_topic_arn    = local.sns_topic_arn
+  # ARN of the Identity Center instance
   sso_instance_arn = local.sso_instance_arn
+  # EventBridge cron/rate schedule for Lambda execution (defaults to rate(180 minutes))
+  step_function_schedule = "rate(180 minutes)"
+  # Tags for the resources
   tags             = local.tags
 }
 
@@ -141,8 +154,10 @@ module "sso_assignment" {
 module "config" {
   source = "../../modules/config"
 
-  dynamodb_table_name = module.sso_assignment.config_dynamodb_table_name
-  configuration       = local.configuration
+  # Configuration for the SSO assignment module
+  configuration      = local.configuration
+  # ARN of the DynamoDB table for storing configuration
+  dynamodb_table_arn = module.sso_assignment.config_dynamodb_table_arn
 
   depends_on = [
     module.sso_assignment
