@@ -59,7 +59,7 @@ module "lambda" {
   function_name = var.name
   memory_size   = var.lambda_memory
   function_tags = var.tags
-  description   = "Lambda function used for the automation of SSO assignments based on templates and account tagging"
+  description   = "Used to automate SSO assignments based on templates and account tagging"
   handler       = "handler.lambda_handler"
   runtime       = var.lambda_runtime
   timeout       = var.lambda_timeout
@@ -150,7 +150,7 @@ resource "aws_cloudwatch_event_rule" "cron_schedule" {
   description         = "Used to trigger the SSO assignment Lambda function on a periodic schedule"
   name                = format("%s-cron-schedule", var.name)
   state               = "ENABLED"
-  schedule_expression = var.lambda_schedule
+  schedule_expression = var.step_function_schedule
   tags                = local.tags
 }
 

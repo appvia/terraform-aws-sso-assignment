@@ -1,8 +1,8 @@
 # Terraform AWS SSO Assignment
 
-This Terraform module deploys automation for **AWS IAM Identity Center (SSO)** account assignments. You define **permission-set templates** in **DynamoDB** (via [`modules/config`](./modules/config/)): template name → list of permission set names. On each **member account**, you set an Organizations tag whose key is **`{prefix}/{template_name}`** (default prefix `sso`, e.g. `sso/default`) and whose **value** is a **comma-separated list of Identity Center group *display names***. The Lambda applies that template's permission sets to each listed group for that account only.
+This Terraform module deploys automation for **AWS IAM Identity Center (SSO)** account assignments. You define **permission-set templates** in **DynamoDB** (via [`modules/config`](./modules/config/)): template name → list of permission set names. On each **member account**, you set an Organizations tag whose key is **`{prefix}/{template_name}`** (Terraform default prefix is `Grant`) and whose **value** is a **comma-separated list of Identity Center group *display names***. The Lambda applies that template's permission sets to each listed group for that account only.
 
-**New in this version:** **Account-level templates** allow you to auto-provision SSO assignments based on account **naming conventions**, **organizational units**, or **tags**—without requiring per-account tags. Combine this with tag-based assignment for flexible, scalable SSO management.
+**Account-level templates** allow you to auto-provision SSO assignments based on account **naming conventions**, **organizational units**, or **tags**—without requiring per-account tags. Combine this with tag-based assignment for flexible, scalable SSO management.
 
 **EventBridge** runs the flow on a schedule and on new account creation; **Step Functions** adds retries and optional **SNS** failure notifications.
 
@@ -10,11 +10,11 @@ Use it when you want repeatable, infrastructure-as-code driven SSO assignments a
 
 ## Features
 
-- **Templates + account tags** (existing): Define permission sets as **named templates** (e.g. `default`, `finance`). Member accounts get tags `sso/<template>` (prefix configurable) listing which **IC groups** receive that template's permission sets on that account.
+- **Templates + account tags**: Define permission sets as **named templates** (e.g. `default`, `finance`). Member accounts get tags `<prefix>/<template>` (prefix configurable; Terraform default is `"Grant"`) listing which **IC groups** receive that template's permission sets on that account.
 - **Account-level templates** (NEW): Automatically apply templates to accounts matching **organizational unit paths**, **account name patterns**, or **account tags**. Uses logical AND matching: all conditions in a matcher must match for the template to apply.
 - **Declarative templates**: The [`modules/config`](./modules/config/) submodule writes templates and account matchers to DynamoDB.
-- **Tag precedence**: Explicit per-account tags override account-level matchers, allowing fine-grained control.
-- **Two trigger modes**: Scheduled reconciliation (default `rate(10 minutes)`) and organization account-creation events (CloudTrail on `CreateAccount`).
+- **Additive sources**: Account tags and account-level templates are both evaluated; matching rules contribute bindings that are reconciled each run.
+- **Two trigger modes**: Scheduled reconciliation (default `rate(180 minutes)`) and organization account-creation events (CloudTrail on `CreateAccount`).
 - **Resilient orchestration**: Step Functions retries Lambda tasks (3 attempts, exponential backoff).
 - **Optional alerting**: If you set `sns_topic_arn`, failed runs can publish error details to your existing SNS topic.
 - **Optional event stream**: If you set `events_sns_topic_arn`, the Lambda publishes assignment lifecycle events (created/deleted) to your existing SNS topic.
@@ -41,7 +41,7 @@ DynamoDB (templates + account matchers) + account tags (which IC groups get the 
 |-------|------|
 | Root module | DynamoDB table, Lambda (via [terraform-aws-modules/lambda/aws](https://github.com/terraform-aws-modules/terraform-aws-lambda)), Step Functions, EventBridge rules and IAM. |
 | `modules/config` | Populates DynamoDB: stores templates and account matchers. |
-| Lambda | Reads account details (OU, name, tags), evaluates account matchers, loads `sso/*` tags, merges with tag precedence, assigns permission sets to named IC groups (`assets/functions/handler.py`). |
+| Lambda | Reads account details (OU path, name, tags), evaluates account matchers, loads `<prefix>/*` tags, and assigns permission sets to named IC groups (`assets/functions/handler.py`). |
 
 ## Usage
 
@@ -67,11 +67,11 @@ locals {
     templates = {
       default = {
         permission_sets = ["OrgReadOnly", "Developer-ReadOnly"]
-        description     = "Baseline access — e.g. sso/default = Platform-ReadOnly,App-Developers"
+        description     = "Baseline access — e.g. Grant/default = Platform-ReadOnly,App-Developers"
       }
       breakglass = {
         permission_sets = ["BreakGlassAdmin"]
-        description     = "Use tag sso/breakglass = SRE-Lead only where needed"
+        description     = "Use tag Grant/breakglass = SRE-Lead only where needed"
       }
     }
     # Optional: Account-level template matchers
@@ -96,8 +96,8 @@ module "sso_assignment" {
 module "config" {
   source = "git::https://github.com/appvia/terraform-aws-sso-assignment.git//modules/config"
 
-  dynamodb_table_name = module.sso_assignment.dynamodb_table_name
-  configuration       = local.configuration
+  dynamodb_table_arn = module.sso_assignment.config_dynamodb_table_arn
+  configuration      = local.configuration
 }
 ```
 
@@ -133,7 +133,7 @@ locals {
       dev_baseline = {
         description = "Auto-provision development accounts"
         matcher = {
-          name_patterns = ["dev-.*]"
+          name_patterns = ["dev-*"]
         }
         template_names = ["development"]
         groups         = ["DevEngineers"]
@@ -157,8 +157,8 @@ module "sso_assignment" {
 module "config" {
   source = "git::https://github.com/appvia/terraform-aws-sso-assignment.git//modules/config"
 
-  dynamodb_table_name = module.sso_assignment.dynamodb_table_name
-  configuration       = local.configuration
+  dynamodb_table_arn = module.sso_assignment.config_dynamodb_table_arn
+  configuration      = local.configuration
 }
 ```
 
@@ -205,8 +205,8 @@ module "sso_assignment" {
   name             = "my-org-sso"
   sso_instance_arn = local.sso_instance_arn
   sso_account_tag_prefix = "sso"
+  step_function_schedule = "rate(30 minutes)"
 
-  lambda_schedule = "rate(30 minutes)"
   lambda_timeout  = 120
   lambda_memory   = 1024
 
@@ -220,8 +220,8 @@ module "sso_assignment" {
 module "config" {
   source = "git::https://github.com/appvia/terraform-aws-sso-assignment.git//modules/config"
 
-  dynamodb_table_name = module.sso_assignment.dynamodb_table_name
-  configuration       = local.configuration
+  dynamodb_table_arn = module.sso_assignment.config_dynamodb_table_arn
+  configuration      = local.configuration
 }
 ```
 
@@ -275,7 +275,6 @@ configuration = {
     template_name = {
       permission_sets = ["PermissionSet1", "PermissionSet2"]
       description     = "Description of this template"
-      enabled         = true  # optional, defaults to true
     }
   }
   
@@ -286,8 +285,8 @@ configuration = {
         # At least ONE of the following must be specified (others are optional)
         # All specified conditions must match (logical AND)
         
-        organizational_units = ["trailing/ou/path/*", "prod"]  # OU trailing path patterns
-        name_pattern         = "prod-*"                          # Account name glob pattern
+        organizational_units = ["ou-prod/*"]          # OU trailing path patterns
+        name_patterns        = ["prod-*", ".*-prod"]  # Account name glob/regex patterns (ANY can match)
         account_tags         = {                                 # Account tags (all must match)
           Environment = "Production"
           ManagedBySSO = "true"
@@ -300,19 +299,6 @@ configuration = {
 }
 ```
 
-### Assignment Precedence
-
-When an account matches both **account templates** and has explicit **account tags**:
-
-1. **Account tags take precedence** — explicit per-account configuration always wins
-2. **Same template, different groups** — both sources' groups receive the permission sets
-3. **Same template, same groups** — tag configuration is used, template configuration is skipped
-
-Example:
-- Account template matches and would assign: `(template="prod", groups=["ProdEngineers"])`
-- Account tag says: `sso/prod = ProdEngineers,ProdAdmins`
-- Result: Both `ProdEngineers` and `ProdAdmins` get the `prod` template's permission sets (tag augments the account template assignment)
-
 ### How member-account tags work
 
 1. **DynamoDB / Terraform** — `configuration.templates` is a map of **template name → permission set names** (and description / optional `enabled`). The map key is stored as `group_name` (e.g. `default`, `finance`).
@@ -322,7 +308,7 @@ Example:
      - If you want tags like `sso/default`, set `sso_account_tag_prefix = "sso"` on the root module (recommended for clarity).
    - **Value**: comma-separated **Identity Center group *display names*** (must match the Identity Store `DisplayName` exactly) that should receive **all** permission sets from that template on **this** account.
 
-   You can set multiple template tags on one account, e.g. `sso/default` and `sso/finance` with different group lists.
+   You can set multiple template tags on one account, e.g. `Grant/default` and `Grant/finance` with different group lists.
 
 **Example tags on an account** (vending / account factory / CLI):
 
@@ -330,8 +316,8 @@ Example:
 aws organizations tag-resource \
   --resource-id 123456789012 \
   --tags \
-    Key=sso/default,Value=App-Developers,App-ReadOnly-Users \
-    Key=sso/finance,Value=Finance-Approvers
+    Key=Grant/default,Value=App-Developers,App-ReadOnly-Users \
+    Key=Grant/finance,Value=Finance-Approvers
 ```
 
 **Inspect tags the Lambda will read:**
@@ -340,13 +326,13 @@ aws organizations tag-resource \
 aws organizations list-tags-for-resource --resource-id 123456789012
 ```
 
-Accounts with **no** `sso/*` tags and **no matching account templates** get **no** assignments from this mechanism (the run still succeeds for other accounts). Add or adjust tags / matchers, then let the next scheduled run (or a Step Functions execution) reconcile assignments.
+Accounts with **no** `<prefix>/*` tags and **no matching account templates** get **no** assignments from this mechanism (the run still succeeds for other accounts). Add or adjust tags / matchers, then let the next scheduled run (or a Step Functions execution) reconcile assignments.
 
 ### Account Template Matcher Details
 
 **Organizational Units** — Match by trailing OU path with glob patterns:
-- OU path format: `/root-ou/prod/workloads` → trailing path: `prod/workloads`
-- Patterns support `*` for wildcards (e.g. `prod/workloads/*`)
+- The Lambda matches against the account’s OU path string returned from Organizations (split on `/` and with the first segment dropped).
+- Patterns support `*` for wildcards (e.g. `ou-prod/ou-workloads*`)
 - At least one pattern must match for the condition to pass
 
 **Account Name** — Match by account name with glob pattern:
@@ -384,19 +370,8 @@ module "config" {
 ### Configuration notes
 
 - **`configuration`** (on `modules/config`): Contains `templates` (top-level keys are template names) and optional `account_templates` (name → matcher + template references). See [modules/config/README.md](./modules/config/README.md).
-- **`sso_account_tag_prefix`** (root module, default `sso`): tag keys on accounts are `<prefix>/<template_name>`.
+- **`sso_account_tag_prefix`** (root module, Terraform default `"Grant"`): tag keys on accounts are `<prefix>/<template_name>`.
 - **Backwards compatibility**: Older configurations using only tag-based assignment continue to work—just use `account_templates = {}` (or omit it, defaults to empty).
-
-## Outputs
-
-| Name | Description |
-|------|-------------|
-| `dynamodb_table_name` | Configuration table name (pass to `modules/config`). |
-| `dynamodb_table_arn` | Table ARN. |
-| `lambda_function_name` | Assignment Lambda name. |
-| `lambda_function_arn` | Assignment Lambda ARN. |
-| `step_function_arn` | State machine ARN (e.g. manual `start-execution`). |
-| `eventbridge_rule_arns` | Map with `account_creation` and `cron_schedule` rule ARNs. |
 
 ## Module layout
 
@@ -411,8 +386,28 @@ terraform-aws-sso-assignment/
 
 ## Workflow behavior
 
-1. **Schedule**: EventBridge invokes the Step Functions workflow on `lambda_schedule`; the Lambda lists target accounts, reads each account's organizational unit and tags, evaluates account templates, reads each account's `sso/*` tags, merges assignments with tag precedence, and creates assignments for each matched template against the matching DynamoDB template.
+1. **Schedule**: EventBridge invokes the Step Functions workflow on `step_function_schedule`; the Lambda lists target accounts, reads each account’s OU path and tags, evaluates account templates, reads each account’s `<prefix>/*` tags, and reconciles assignments against DynamoDB templates.
 2. **New account**: An EventBridge rule matches Organizations `CreateAccount` CloudTrail events and starts the same state machine so new accounts can be included in the next reconciliation.
+
+### Configuration updates (`enable_config_triggers`)
+
+By default, the root module enables **configuration update triggers** (`enable_config_triggers = true`). When enabled, updates to the DynamoDB **config** table (populated by `modules/config`) will automatically trigger the Step Functions workflow so changes are reconciled without waiting for the next schedule.
+
+- **How it works**: DynamoDB Streams on the config table → EventBridge Pipes (`aws_pipes_pipe.config_update`) → Step Functions (`invocation_type = "FIRE_AND_FORGET"`).
+- **What gets triggered**: the state machine is started with an input payload like:
+
+```json
+{
+  "source": "config_update",
+  "account_id": "<from DynamoDB stream record>",
+  "dry_run": "true|false",
+  "region": "<event region>",
+  "time": "<event time>"
+}
+```
+
+- **Dry-run support**: if `enable_dry_run = true` on the root module, the trigger still fires but the Lambda will skip write actions.
+- **Disable if undesired**: set `enable_config_triggers = false` to remove the DynamoDB stream, pipe, and its log group (you’ll still have schedule + account-creation triggers).
 
 For low-level steps (retries, SNS on failure), inspect `step_function.tf` and `assets/functions/handler.py`.
 
@@ -427,7 +422,7 @@ terraform apply
 ### Verify
 
 ```bash
-TABLE_NAME=$(terraform output -raw dynamodb_table_name)
+TABLE_NAME=$(terraform output -raw config_dynamodb_table_name)
 aws dynamodb describe-table --table-name "$TABLE_NAME"
 
 FN=$(terraform output -raw lambda_function_name)
@@ -439,7 +434,7 @@ aws stepfunctions describe-state-machine --state-machine-arn "$SF"
 
 ## IAM (high level)
 
-The module defines IAM for Lambda (DynamoDB read, SSO/Identity Store/Organizations APIs including `ListTagsForResource` on member accounts, logs, and optional `sns:Publish` when `assignment_events_sns_topic_arn` is set), Step Functions (invoke Lambda, optional SNS publish via `sns_topic_arn`), and EventBridge (start execution). Exact policies are in `data.tf` and `step_function.tf`.
+The module defines IAM for Lambda (DynamoDB read, SSO/Identity Store/Organizations APIs including `ListTagsForResource` on member accounts, logs, and optional `sns:Publish` when `events_sns_topic_arn` is set), Step Functions (invoke Lambda, optional SNS publish via `sns_topic_arn`), and EventBridge (start execution). Exact policies are in `data.tf` and `step_function.tf`.
 
 ## Troubleshooting
 
@@ -458,7 +453,7 @@ The module defines IAM for Lambda (DynamoDB read, SSO/Identity Store/Organizatio
 
 ### No assignments for an account
 
-- It may have no `sso/*` tags or matching account templates
+- It may have no `<prefix>/*` tags or matching account templates
 - If using account templates, verify the matcher conditions all pass
 - Confirm tag value group names match Identity Center **DisplayName** exactly (case-sensitive)
 - Confirm with `aws identitystore list-groups` / console
@@ -495,16 +490,18 @@ See [LICENSE](./LICENSE).
 | <a name="input_cloudwatch_logs_log_group_class"></a> [cloudwatch\_logs\_log\_group\_class](#input\_cloudwatch\_logs\_log\_group\_class) | The class of the CloudWatch log group | `string` | `"STANDARD"` | no |
 | <a name="input_cloudwatch_logs_retention_in_days"></a> [cloudwatch\_logs\_retention\_in\_days](#input\_cloudwatch\_logs\_retention\_in\_days) | The number of days to retain the CloudWatch logs | `number` | `30` | no |
 | <a name="input_dynamodb_billing_mode"></a> [dynamodb\_billing\_mode](#input\_dynamodb\_billing\_mode) | DynamoDB billing mode (PAY\_PER\_REQUEST or PROVISIONED) | `string` | `"PAY_PER_REQUEST"` | no |
+| <a name="input_dynamodb_encryption_enabled"></a> [dynamodb\_encryption\_enabled](#input\_dynamodb\_encryption\_enabled) | Enable server-side encryption for DynamoDB tables (will use AWS managed KMS key by default) | `bool` | `false` | no |
+| <a name="input_dynamodb_kms_key"></a> [dynamodb\_kms\_key](#input\_dynamodb\_kms\_key) | Optional KMS key ID for DynamoDB encryption | `string` | `null` | no |
 | <a name="input_enable_config_triggers"></a> [enable\_config\_triggers](#input\_enable\_config\_triggers) | Enable EventBridge Pipes to trigger Lambda when config table is updated | `bool` | `true` | no |
 | <a name="input_enable_dry_run"></a> [enable\_dry\_run](#input\_enable\_dry\_run) | When true, triggers run the Lambda in dry-run (noop) mode | `bool` | `false` | no |
 | <a name="input_events_sns_topic_arn"></a> [events\_sns\_topic\_arn](#input\_events\_sns\_topic\_arn) | Optional ARN of an existing SNS topic to publish assignment creation/deletion events from the Lambda (if null, event publishing disabled). This topic is NOT created by this module. | `string` | `null` | no |
 | <a name="input_lambda_memory"></a> [lambda\_memory](#input\_lambda\_memory) | Lambda function memory allocation in MB | `number` | `512` | no |
 | <a name="input_lambda_runtime"></a> [lambda\_runtime](#input\_lambda\_runtime) | Lambda function runtime | `string` | `"python3.14"` | no |
-| <a name="input_lambda_schedule"></a> [lambda\_schedule](#input\_lambda\_schedule) | EventBridge cron/rate schedule for Lambda execution | `string` | `"rate(180 minutes)"` | no |
 | <a name="input_lambda_timeout"></a> [lambda\_timeout](#input\_lambda\_timeout) | Lambda function timeout in seconds | `number` | `300` | no |
 | <a name="input_name"></a> [name](#input\_name) | Name for all resources i.e. handler, lambda, step function, event bridge, etc. | `string` | `"lz-sso"` | no |
 | <a name="input_sns_topic_arn"></a> [sns\_topic\_arn](#input\_sns\_topic\_arn) | ARN of SNS topic for Step Function notifications (if null, notifications disabled) | `string` | `null` | no |
 | <a name="input_sso_account_tag_prefix"></a> [sso\_account\_tag\_prefix](#input\_sso\_account\_tag\_prefix) | Account tag key prefix for permission-set templates. Keys are {prefix}/{template\_name} (e.g. sso/default) — see module README | `string` | `"Grant"` | no |
+| <a name="input_step_function_schedule"></a> [step\_function\_schedule](#input\_step\_function\_schedule) | EventBridge cron/rate schedule for Lambda execution | `string` | `"rate(180 minutes)"` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Common tags to apply to all resources | `map(string)` | `{}` | no |
 
 ## Outputs

@@ -83,12 +83,6 @@ variable "lambda_runtime" {
   }
 }
 
-variable "lambda_schedule" {
-  description = "EventBridge cron/rate schedule for Lambda execution"
-  type        = string
-  default     = "rate(180 minutes)"
-}
-
 variable "lambda_timeout" {
   description = "Lambda function timeout in seconds"
   type        = number
@@ -115,6 +109,12 @@ variable "sns_topic_arn" {
   description = "ARN of SNS topic for Step Function notifications (if null, notifications disabled)"
   type        = string
   default     = null
+}
+
+variable "step_function_schedule" {
+  description = "EventBridge cron/rate schedule for Lambda execution"
+  type        = string
+  default     = "rate(180 minutes)"
 }
 
 variable "events_sns_topic_arn" {
