@@ -10,6 +10,18 @@ resource "aws_dynamodb_table" "config" {
   stream_view_type = var.enable_config_triggers ? "NEW_AND_OLD_IMAGES" : null
   tags             = local.tags
 
+  # Point-in-time recovery for DynamoDB table
+  dynamic "point_in_time_recovery" {
+    for_each = var.dynamodb_point_in_time_recovery_enabled ? [1] : []
+
+    content {
+      # Enable point-in-time recovery 
+      enabled = var.dynamodb_point_in_time_recovery_enabled
+      # The number of days to retain the DynamoDB point-in-time recovery
+      recovery_period_in_days = var.dynamodb_point_in_time_recovery_retention_period
+    }
+  }
+
   # Server-side encryption with KMS key
   server_side_encryption {
     # Enable server-side encryption (will use AWS managed KMS key by default)
@@ -35,6 +47,18 @@ resource "aws_dynamodb_table" "assignments_tracking" {
   hash_key     = "assignment_id"
   name         = format("%s-tracking", var.name)
   tags         = local.tags
+
+  # Point-in-time recovery for DynamoDB table
+  dynamic "point_in_time_recovery" {
+    for_each = var.dynamodb_point_in_time_recovery_enabled ? [1] : []
+
+    content {
+      # Enable point-in-time recovery 
+      enabled = var.dynamodb_point_in_time_recovery_enabled
+      # The number of days to retain the DynamoDB point-in-time recovery
+      recovery_period_in_days = var.dynamodb_point_in_time_recovery_retention_period
+    }
+  }
 
   # Server-side encryption with KMS key
   server_side_encryption {

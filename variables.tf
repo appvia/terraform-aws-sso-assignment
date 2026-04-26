@@ -49,6 +49,23 @@ variable "dynamodb_kms_key" {
   default     = null
 }
 
+variable "dynamodb_point_in_time_recovery_enabled" {
+  description = "Enable point-in-time recovery for DynamoDB tables (for both tables)"
+  type        = bool
+  default     = false
+}
+
+variable "dynamodb_point_in_time_recovery_retention_period" {
+  description = "The number of days to retain the DynamoDB point-in-time recovery"
+  type        = number
+  default     = 7
+
+  validation {
+    condition     = var.dynamodb_point_in_time_recovery_retention_period >= 1 && var.dynamodb_point_in_time_recovery_retention_period <= 35
+    error_message = "dynamodb_point_in_time_recovery_retention_period must be between 1 and 35 days."
+  }
+}
+
 variable "enable_config_triggers" {
   description = "Enable EventBridge Pipes to trigger Lambda when config table is updated"
   type        = bool
