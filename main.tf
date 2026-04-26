@@ -15,7 +15,7 @@ resource "aws_dynamodb_table" "config" {
     for_each = var.dynamodb_point_in_time_recovery_enabled ? [1] : []
 
     content {
-      # Enable point-in-time recovery 
+      # Enable point-in-time recovery
       enabled = var.dynamodb_point_in_time_recovery_enabled
       # The number of days to retain the DynamoDB point-in-time recovery
       recovery_period_in_days = var.dynamodb_point_in_time_recovery_retention_period
@@ -53,7 +53,7 @@ resource "aws_dynamodb_table" "assignments_tracking" {
     for_each = var.dynamodb_point_in_time_recovery_enabled ? [1] : []
 
     content {
-      # Enable point-in-time recovery 
+      # Enable point-in-time recovery
       enabled = var.dynamodb_point_in_time_recovery_enabled
       # The number of days to retain the DynamoDB point-in-time recovery
       recovery_period_in_days = var.dynamodb_point_in_time_recovery_retention_period
@@ -77,7 +77,7 @@ resource "aws_dynamodb_table" "assignments_tracking" {
 ## Lambda function for SSO group assignment using terraform-aws-modules/lambda/aws
 module "lambda" {
   source  = "terraform-aws-modules/lambda/aws"
-  version = "8.8.0"
+  version = "8.7.0"
 
   architectures = ["arm64"]
   function_name = var.name
