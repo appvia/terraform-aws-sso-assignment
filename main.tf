@@ -10,6 +10,14 @@ resource "aws_dynamodb_table" "config" {
   stream_view_type = var.enable_config_triggers ? "NEW_AND_OLD_IMAGES" : null
   tags             = local.tags
 
+  # Server-side encryption with KMS key
+  server_side_encryption {
+    # Enable server-side encryption (will use AWS managed KMS key by default)
+    enabled = var.dynamodb_encryption_enabled
+    # Optional KMS key ARN for encryption
+    kms_key_arn = var.dynamodb_kms_key
+  }
+
   attribute {
     name = "group_name"
     type = "S"
@@ -27,6 +35,14 @@ resource "aws_dynamodb_table" "assignments_tracking" {
   hash_key     = "assignment_id"
   name         = format("%s-tracking", var.name)
   tags         = local.tags
+
+  # Server-side encryption with KMS key
+  server_side_encryption {
+    # Enable server-side encryption (will use AWS managed KMS key by default)
+    enabled = var.dynamodb_encryption_enabled
+    # Optional KMS key ARN for encryption
+    kms_key_arn = var.dynamodb_kms_key
+  }
 
   attribute {
     name = "assignment_id"

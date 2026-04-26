@@ -37,6 +37,18 @@ variable "dynamodb_billing_mode" {
   }
 }
 
+variable "dynamodb_encryption_enabled" {
+  description = "Enable server-side encryption for DynamoDB tables (will use AWS managed KMS key by default)"
+  type        = bool
+  default     = false
+}
+
+variable "dynamodb_kms_key" {
+  description = "Optional KMS key ID for DynamoDB encryption"
+  type        = string
+  default     = null
+}
+
 variable "enable_config_triggers" {
   description = "Enable EventBridge Pipes to trigger Lambda when config table is updated"
   type        = bool
