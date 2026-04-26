@@ -71,20 +71,20 @@ configuration = {
 ## Providers
 
 | Name | Version |
-|------|---------|
+| ---- | ------- |
 | <a name="provider_aws"></a> [aws](#provider\_aws) | >= 6.0.0 |
 
 ## Inputs
 
 | Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
+| ---- | ----------- | ---- | ------- | :------: |
 | <a name="input_configuration"></a> [configuration](#input\_configuration) | SSO configuration containing templates and account-level template matchers | <pre>object({<br/>    # Permission-set templates keyed by template name<br/>    # Each key can be referenced by account tags ({prefix}/{key}) or account templates<br/>    templates = map(object({<br/>      # List of permission sets to assign to the group<br/>      permission_sets = list(string)<br/>      # Description of the template<br/>      description = string<br/>    }))<br/><br/>    # Account-level templates: auto-provision accounts matching conditions<br/>    # Optional - default empty (no account-level matching)<br/>    account_templates = optional(map(object({<br/>      # Description of this account template matcher<br/>      description = string<br/>      # Exclude accounts that match this pattern - supports python re syntax<br/>      excluded = optional(list(string))<br/>      # List of template names to apply to matching accounts<br/>      template_names = list(string)<br/>      # List of groups from those templates to assign<br/>      # These groups will receive the permission sets defined in the templates<br/>      groups = list(string)<br/>      # Matcher conditions (logical AND: all specified conditions must match)<br/>      matcher = object({<br/>        # Match by organizational unit trailing path with glob patterns<br/>        # e.g., ["production/accounts/*", "prod"]<br/>        organizational_units = optional(list(string))<br/>        # Match by account name with glob pattern<br/>        # e.g., "prod-*"<br/>        name_patterns = optional(list(string))<br/>        # Match by account tags (all specified tags must exist and match)<br/>        # e.g., { Environment = "Production", CostCenter = "Engineering" }<br/>        account_tags = optional(map(string))<br/>      })<br/>    })), {})<br/>  })</pre> | n/a | yes |
 | <a name="input_dynamodb_table_arn"></a> [dynamodb\_table\_arn](#input\_dynamodb\_table\_arn) | ARN of the DynamoDB table for storing configuration | `string` | n/a | yes |
 
 ## Outputs
 
 | Name | Description |
-|------|-------------|
+| ---- | ----------- |
 | <a name="output_configuration"></a> [configuration](#output\_configuration) | Count of DynamoDB items created for group configurations |
 | <a name="output_dynamodb_table_arn"></a> [dynamodb\_table\_arn](#output\_dynamodb\_table\_arn) | ARN of the DynamoDB table where configurations are stored |
 | <a name="output_dynamodb_table_name"></a> [dynamodb\_table\_name](#output\_dynamodb\_table\_name) | Name of the DynamoDB table where configurations are stored |

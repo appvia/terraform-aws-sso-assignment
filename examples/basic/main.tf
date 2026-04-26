@@ -141,13 +141,13 @@ module "sso_assignment" {
   # Enable EventBridge Pipes to trigger Lambda when config table is updated (defaults to true)
   enable_config_triggers = true
   # Optional: Set to SNS topic ARN to receive notifications (null = disabled)
-  sns_topic_arn    = local.sns_topic_arn
+  sns_topic_arn = local.sns_topic_arn
   # ARN of the Identity Center instance
   sso_instance_arn = local.sso_instance_arn
   # EventBridge cron/rate schedule for Lambda execution (defaults to rate(180 minutes))
   step_function_schedule = "rate(180 minutes)"
   # Tags for the resources
-  tags             = local.tags
+  tags = local.tags
 }
 
 ## Configure the dynamoDB table for the SSO group assignments
@@ -155,7 +155,7 @@ module "config" {
   source = "../../modules/config"
 
   # Configuration for the SSO assignment module
-  configuration      = local.configuration
+  configuration = local.configuration
   # ARN of the DynamoDB table for storing configuration
   dynamodb_table_arn = module.sso_assignment.config_dynamodb_table_arn
 
