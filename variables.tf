@@ -69,7 +69,7 @@ variable "dynamodb_point_in_time_recovery_retention_period" {
 variable "enable_account_triggers" {
   description = "Enable EventBridge rules to trigger Lambda when AWS Organizations account creation events are detected (Only available in the us-east-1 region)"
   type        = bool
-  default     = false 
+  default     = false
 }
 
 variable "enable_config_triggers" {
