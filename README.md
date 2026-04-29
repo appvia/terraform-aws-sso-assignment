@@ -389,6 +389,70 @@ terraform-aws-sso-assignment/
 1. **Schedule**: EventBridge invokes the Step Functions workflow on `step_function_schedule`; the Lambda lists target accounts, reads each account’s OU path and tags, evaluates account templates, reads each account’s `<prefix>/*` tags, and reconciles assignments against DynamoDB templates.
 2. **New account**: An EventBridge rule matches Organizations `CreateAccount` CloudTrail events and starts the same state machine so new accounts can be included in the next reconciliation.
 
+### Region note (important): Organizations `CreateAccount` events are in `us-east-1`
+
+The **account-creation trigger** relies on the CloudTrail event `CreateAccount` (detail-type: `AWS API Call via CloudTrail`, source: `aws.organizations`). For AWS Organizations, this event is emitted/observable via EventBridge in **`us-east-1`**.
+
+That means:
+
+- **If you deploy this module outside `us-east-1`**, the module’s built-in `account_creation` EventBridge rule in that region **will not see** the `CreateAccount` events, so the “new account” trigger won’t fire from that region.
+- **To enable the account-creation trigger when the module is deployed elsewhere**, create an **additional** EventBridge rule + target in **`us-east-1`** that starts the exported Step Functions state machine using the exported invoke role.
+
+The module already exports what you need:
+
+- `step_function_arn`
+- `eventbridge_invoke_role_arn` (this is the role EventBridge assumes to start the state machine)
+  - Note: this module output is intentionally named **`eventbridge_invoke_role_arn`** (not `eventbridge_role_invoke_arn`)
+
+#### Example: Create the `us-east-1` EventBridge rule/target (when module is deployed in another region)
+
+```hcl
+# Configure a second AWS provider for us-east-1
+provider "aws" {
+  alias  = "use1"
+  region = "us-east-1"
+}
+
+module "sso_assignment" {
+  source = "git::https://github.com/appvia/terraform-aws-sso-assignment.git"
+
+  # Deploy the module in your chosen region (not us-east-1 in this example)
+  # provider = aws  # default provider
+
+  sso_instance_arn        = var.sso_instance_arn
+  sso_account_tag_prefix  = "sso"
+  step_function_schedule  = "rate(180 minutes)"
+  # ... other inputs ...
+}
+
+# Mirror the module's CreateAccount rule in us-east-1
+resource "aws_cloudwatch_event_rule" "sso_assignment_account_creation_use1" {
+  name           = "sso-assignment-account-creation-use1"
+  description    = "Triggers sso-assignment Step Function on Organizations CreateAccount (must be in us-east-1)"
+  event_bus_name = "default"
+  state          = "ENABLED"
+
+  event_pattern = jsonencode({
+    source      = ["aws.organizations"]
+    detail-type = ["AWS API Call via CloudTrail"]
+    detail = {
+      eventName   = ["CreateAccount"]
+      eventSource = ["organizations.amazonaws.com"]
+    }
+  })
+  
+  provider       = aws.use1
+}
+
+resource "aws_cloudwatch_event_target" "sso_assignment_account_creation_use1" {
+  rule     = aws_cloudwatch_event_rule.sso_assignment_account_creation_use1.name
+  arn      = module.sso_assignment.step_function_arn
+  role_arn = module.sso_assignment.eventbridge_invoke_role_arn
+
+  provider = aws.use1
+}
+```
+
 ### Configuration updates (`enable_config_triggers`)
 
 By default, the root module enables **configuration update triggers** (`enable_config_triggers = true`). When enabled, updates to the DynamoDB **config** table (populated by `modules/config`) will automatically trigger the Step Functions workflow so changes are reconciled without waiting for the next schedule.
@@ -494,6 +558,7 @@ See [LICENSE](./LICENSE).
 | <a name="input_dynamodb_kms_key"></a> [dynamodb\_kms\_key](#input\_dynamodb\_kms\_key) | Optional KMS key ID for DynamoDB encryption | `string` | `null` | no |
 | <a name="input_dynamodb_point_in_time_recovery_enabled"></a> [dynamodb\_point\_in\_time\_recovery\_enabled](#input\_dynamodb\_point\_in\_time\_recovery\_enabled) | Enable point-in-time recovery for DynamoDB tables (for both tables) | `bool` | `false` | no |
 | <a name="input_dynamodb_point_in_time_recovery_retention_period"></a> [dynamodb\_point\_in\_time\_recovery\_retention\_period](#input\_dynamodb\_point\_in\_time\_recovery\_retention\_period) | The number of days to retain the DynamoDB point-in-time recovery | `number` | `7` | no |
+| <a name="input_enable_account_triggers"></a> [enable\_account\_triggers](#input\_enable\_account\_triggers) | Enable EventBridge rules to trigger Lambda when AWS Organizations account creation events are detected (Only available in the us-east-1 region) | `bool` | `false` | no |
 | <a name="input_enable_config_triggers"></a> [enable\_config\_triggers](#input\_enable\_config\_triggers) | Enable EventBridge Pipes to trigger Lambda when config table is updated | `bool` | `true` | no |
 | <a name="input_enable_dry_run"></a> [enable\_dry\_run](#input\_enable\_dry\_run) | When true, triggers run the Lambda in dry-run (noop) mode | `bool` | `false` | no |
 | <a name="input_events_sns_topic_arn"></a> [events\_sns\_topic\_arn](#input\_events\_sns\_topic\_arn) | Optional ARN of an existing SNS topic to publish assignment creation/deletion events from the Lambda (if null, event publishing disabled). This topic is NOT created by this module. | `string` | `null` | no |
@@ -512,7 +577,9 @@ See [LICENSE](./LICENSE).
 |------|-------------|
 | <a name="output_config_dynamodb_table_arn"></a> [config\_dynamodb\_table\_arn](#output\_config\_dynamodb\_table\_arn) | ARN of the DynamoDB table storing group configurations |
 | <a name="output_config_dynamodb_table_name"></a> [config\_dynamodb\_table\_name](#output\_config\_dynamodb\_table\_name) | Name of the DynamoDB table storing group configurations |
+| <a name="output_eventbridge_invoke_role_arn"></a> [eventbridge\_invoke\_role\_arn](#output\_eventbridge\_invoke\_role\_arn) | ARN of EventBridge roles for account creation and cron schedule |
 | <a name="output_eventbridge_rule_arns"></a> [eventbridge\_rule\_arns](#output\_eventbridge\_rule\_arns) | ARNs of EventBridge rules for account creation and cron schedule |
+| <a name="output_eventbridge_rule_names"></a> [eventbridge\_rule\_names](#output\_eventbridge\_rule\_names) | Names of EventBridge rules for account creation and cron schedule |
 | <a name="output_lambda_function_arn"></a> [lambda\_function\_arn](#output\_lambda\_function\_arn) | ARN of the Lambda function for SSO group assignment |
 | <a name="output_lambda_function_name"></a> [lambda\_function\_name](#output\_lambda\_function\_name) | Name of the Lambda function for SSO group assignment |
 | <a name="output_lambda_policy_json"></a> [lambda\_policy\_json](#output\_lambda\_policy\_json) | IAM policy document (JSON) attached to the Lambda role via policy\_json |

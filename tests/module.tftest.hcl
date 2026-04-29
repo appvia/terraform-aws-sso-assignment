@@ -159,6 +159,44 @@ run "config_triggers_enabled_creates_pipe_and_stream" {
   }
 }
 
+run "account_triggers_disabled_removes_account_creation_rule_and_target" {
+  command = plan
+
+  variables {
+    enable_account_triggers = false
+    sso_instance_arn        = "arn:aws:sso:::instance/ssoins-1234567890abcdef"
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_event_rule.account_creation) == 0
+    error_message = "Expected no account creation EventBridge rule when enable_account_triggers=false."
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_event_target.account_creation_target) == 0
+    error_message = "Expected no account creation EventBridge target when enable_account_triggers=false."
+  }
+}
+
+run "account_triggers_enabled_creates_account_creation_rule_and_target" {
+  command = plan
+
+  variables {
+    enable_account_triggers = true
+    sso_instance_arn        = "arn:aws:sso:::instance/ssoins-1234567890abcdef"
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_event_rule.account_creation) == 1
+    error_message = "Expected account creation EventBridge rule when enable_account_triggers=true."
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_event_target.account_creation_target) == 1
+    error_message = "Expected account creation EventBridge target when enable_account_triggers=true."
+  }
+}
+
 run "step_function_policy_includes_sns_publish_when_topic_provided" {
   command = apply
 

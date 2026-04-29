@@ -180,6 +180,8 @@ resource "aws_cloudwatch_event_rule" "cron_schedule" {
 
 ## Provision a EventBridge rule for the AWS Organizations account creation events
 resource "aws_cloudwatch_event_rule" "account_creation" {
+  count = var.enable_account_triggers ? 1 : 0
+
   description    = "Used to trigger the SSO assignment Lambda function when a new account is created in the AWS Organizations"
   event_bus_name = "default"
   name           = format("%s-account-creation", var.name)
@@ -258,9 +260,11 @@ resource "aws_pipes_pipe" "config_update" {
 
 ## Provision a EventBridge rule for the AWS Organizations account creation events
 resource "aws_cloudwatch_event_target" "account_creation_target" {
+  count = var.enable_account_triggers ? 1 : 0
+
   arn      = aws_sfn_state_machine.main.arn
   role_arn = aws_iam_role.eventbridge_invoke.arn
-  rule     = aws_cloudwatch_event_rule.account_creation.name
+  rule     = aws_cloudwatch_event_rule.account_creation[0].name
 }
 
 ## Cron schedule event rule target for invoking Step Function
