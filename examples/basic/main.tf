@@ -85,7 +85,12 @@ locals {
         groups         = ["Cloud Data Engineers"]
 
         matcher = {
-          organizational_units = ["/data/*"]
+          # OU patterns match against the account's trailing OU path with the
+          # leading segment stripped. An account in OU path "/data/development"
+          # becomes "data/development" before matching, so the pattern must NOT
+          # include a leading slash. Use fnmatch glob syntax (* matches any
+          # characters within a path segment or across segments).
+          organizational_units = ["data/*"]
         }
       }
 

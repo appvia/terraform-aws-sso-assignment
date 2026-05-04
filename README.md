@@ -122,8 +122,10 @@ locals {
       prod_baseline = {
         description = "Auto-provision production accounts by OU"
         matcher = {
-          # Matches accounts in organizational unit paths like:
-          # "production/accounts/prod-workload-1"
+          # Matches accounts whose OU path (leading segment stripped) matches the
+          # pattern. An account in OU "/production/accounts" becomes
+          # "production/accounts" before matching, so do NOT include a leading slash.
+          # This pattern matches e.g. "production/accounts/prod-workload-1".
           organizational_units = ["production/accounts/*"]
         }
         template_names = ["production"]
@@ -285,7 +287,7 @@ configuration = {
         # At least ONE of the following must be specified (others are optional)
         # All specified conditions must match (logical AND)
         
-        organizational_units = ["ou-prod/*"]          # OU trailing path patterns
+        organizational_units = ["prod/*"]             # OU trailing path patterns — no leading slash (see matcher details below)
         name_patterns        = ["prod-*", ".*-prod"]  # Account name glob/regex patterns (ANY can match)
         account_tags         = {                                 # Account tags (all must match)
           Environment = "Production"
@@ -331,9 +333,11 @@ Accounts with **no** `<prefix>/*` tags and **no matching account templates** get
 ### Account Template Matcher Details
 
 **Organizational Units** — Match by trailing OU path with glob patterns:
-- The Lambda matches against the account’s OU path string returned from Organizations (split on `/` and with the first segment dropped).
-- Patterns support `*` for wildcards (e.g. `ou-prod/ou-workloads*`)
-- At least one pattern must match for the condition to pass
+- The Lambda fetches the account's full OU path from AWS Organizations (e.g. `/data/development`), splits it on `/`, and drops the first segment, yielding a leading-slash-free string (e.g. `data/development`).
+- Patterns are matched against this stripped path using Python [`fnmatch`](https://docs.python.org/3/library/fnmatch.html) (shell-style globs: `*` matches any characters, `?` matches one character).
+- **Do not include a leading `/` in your patterns.** A pattern of `/data/*` will never match — use `data/*` instead.
+- An account in OU `/data/development` is matched by `data/*`, `data/development`, or `data/d*`.
+- At least one pattern must match for the condition to pass.
 
 **Account Name** — Match by account name with glob pattern:
 - Single pattern string (e.g. `prod-*`)
@@ -511,6 +515,7 @@ The module defines IAM for Lambda (DynamoDB read, SSO/Identity Store/Organizatio
 ### Account template not matching
 
 - Check account OU path: Use `aws organizations list-parents --child-id <account-id>` and build the full path
+- **OU pattern format**: The Lambda strips the leading `/` (and any root identifier) from the OU path before matching. An account in OU `/data/development` is matched as `data/development`. Your pattern must **not** include a leading slash — use `data/*`, not `/data/*`.
 - Check account name: Use `aws organizations describe-account --account-id <account-id>`
 - Check account tags: Use `aws organizations list-tags-for-resource --resource-id <account-id>`
 - Enable DEBUG logging: Check Lambda CloudWatch logs for detailed matcher debug output
