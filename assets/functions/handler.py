@@ -148,16 +148,21 @@ def reconcile_creations(
             try:
                 # If running in dry run mode, skip the assignment creation
                 if dry_run:
+                    principal_descriptor = {"group_name": principal_name}
+                    # Unless it's a user, then change the descriptor
+                    if principal_type == "USER":
+                        principal_descriptor = {"user_name": principal_name}
+
                     logger.info(
                         "Dry run mode, skipping assignment creation",
                         extra={
                             "action": "assign_permissions",
                             "account_id": binding.account_id,
-                            "group_name": principal_name,
                             "permission_set_name": binding.permission_set_name,
                             "principal_id": principal_id,
                             "principal_type": principal_type,
                             "template_name": binding.template_name,
+                            **principal_descriptor,
                         },
                     )
                     continue
