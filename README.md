@@ -1,8 +1,8 @@
 # Terraform AWS SSO Assignment
 
-This Terraform module deploys automation for **AWS IAM Identity Center (SSO)** account assignments. You define **permission-set templates** in **DynamoDB** (via [`modules/config`](./modules/config/)): template name → list of permission set names. On each **member account**, you set an Organizations tag whose key is **`{prefix}/{template_name}`** (Terraform default prefix is `Grant`) and whose **value** is a **comma-separated list of Identity Center group *display names***. The Lambda applies that template's permission sets to each listed group for that account only.
+This Terraform module deploys automation for **AWS IAM Identity Center (SSO)** account assignments. You define **permission-set templates** in **DynamoDB** (via [`modules/config`](./modules/config/)): template name → list of permission set names.
 
-**Account-level templates** allow you to auto-provision SSO assignments based on account **naming conventions**, **organizational units**, or **tags**—without requiring per-account tags. Combine this with tag-based assignment for flexible, scalable SSO management.
+**Account-level templates** allow you to auto-provision SSO assignments based on account **naming conventions**, **organizational units**, or **tags**. Account-level templates can bind **both groups and users** directly to accounts (useful for ad-hoc / one-off assignments).
 
 **EventBridge** runs the flow on a schedule and on new account creation; **Step Functions** adds retries and optional **SNS** failure notifications.
 
@@ -10,10 +10,10 @@ Use it when you want repeatable, infrastructure-as-code driven SSO assignments a
 
 ## Features
 
-- **Templates + account tags**: Define permission sets as **named templates** (e.g. `default`, `finance`). Member accounts get tags `<prefix>/<template>` (prefix configurable; Terraform default is `"Grant"`) listing which **IC groups** receive that template's permission sets on that account.
 - **Account-level templates** (NEW): Automatically apply templates to accounts matching **organizational unit paths**, **account name patterns**, or **account tags**. Uses logical AND matching: all conditions in a matcher must match for the template to apply.
+- **Account-level user bindings**: Account-level templates can also include a `users` list, which assigns the template's permission sets directly to **Identity Center users** (resolved via Identity Store APIs). This is intended for **ad-hoc** access; at scale, prefer groups.
 - **Declarative templates**: The [`modules/config`](./modules/config/) submodule writes templates and account matchers to DynamoDB.
-- **Additive sources**: Account tags and account-level templates are both evaluated; matching rules contribute bindings that are reconciled each run.
+- **Reconciliation**: Matching rules contribute bindings that are reconciled each run.
 - **Two trigger modes**: Scheduled reconciliation (default `rate(180 minutes)`) and organization account-creation events (CloudTrail on `CreateAccount`).
 - **Resilient orchestration**: Step Functions retries Lambda tasks (3 attempts, exponential backoff).
 - **Optional alerting**: If you set `sns_topic_arn`, failed runs can publish error details to your existing SNS topic.
@@ -28,9 +28,9 @@ EventBridge (account creation / schedule)
            ↓
        Step Functions (retries, optional SNS on failure)
            ↓
-       Lambda (reads DynamoDB + account tags, calls SSO + Organizations)
+       Lambda (reads DynamoDB config, calls SSO + Organizations)
            ↓
-DynamoDB (templates + account matchers) + account tags (which IC groups get the template)
+DynamoDB (templates + account matchers)
            ↓
        IAM Identity Center + Organizations
 ```
@@ -41,7 +41,7 @@ DynamoDB (templates + account matchers) + account tags (which IC groups get the 
 |-------|------|
 | Root module | DynamoDB table, Lambda (via [terraform-aws-modules/lambda/aws](https://github.com/terraform-aws-modules/terraform-aws-lambda)), Step Functions, EventBridge rules and IAM. |
 | `modules/config` | Populates DynamoDB: stores templates and account matchers. |
-| Lambda | Reads account details (OU path, name, tags), evaluates account matchers, loads `<prefix>/*` tags, and assigns permission sets to named IC groups (`assets/functions/handler.py`). |
+| Lambda | Reads account details (OU path, name, tags), evaluates account matchers, and assigns permission sets to named IC groups (`assets/functions/handler.py`). |
 
 ## Usage
 
@@ -49,6 +49,7 @@ DynamoDB (templates + account matchers) + account tags (which IC groups get the 
 
 - Terraform **>= 1.0** and AWS provider **>= 6.0** (see `terraform.tf`).
 - IAM Identity Center enabled; permission sets and groups already exist (this module assigns groups to accounts—it does not create permission sets or IdP groups).
+- For `account_templates.users`, the referenced users must already exist in the Identity Store (Identity Center directory).
 - Credentials with rights to deploy Lambda, DynamoDB, Step Functions, EventBridge, IAM, and (for the handler) SSO Admin, Organizations, and Identity Store actions.
 - SSO instance ARN, for example:
 
@@ -86,8 +87,6 @@ module "sso_assignment" {
   source = "git::https://github.com/appvia/terraform-aws-sso-assignment.git"
 
   sso_instance_arn = local.sso_instance_arn
-  # The module default is "Grant". Set this if you want tags like `sso/default`.
-  sso_account_tag_prefix = "sso"
   tags = {
     Project = "sso-assignment"
   }
@@ -122,14 +121,16 @@ locals {
       prod_baseline = {
         description = "Auto-provision production accounts by OU"
         matcher = {
-          # Matches accounts whose OU path (leading segment stripped) matches the
-          # pattern. An account in OU "/production/accounts" becomes
-          # "production/accounts" before matching, so do NOT include a leading slash.
-          # This pattern matches e.g. "production/accounts/prod-workload-1".
-          organizational_units = ["production/accounts/*"]
+          # Matches accounts whose OU path matches the pattern.
+          # OU paths are normalized to include a leading "/" before matching, so
+          # patterns can (and should) include a leading "/".
+          # This pattern matches e.g. "/production/accounts/prod-workload-1".
+          organizational_units = ["/production/accounts/*"]
         }
         template_names = ["production"]
         groups         = ["ProdEngineers"]
+        # Optional: direct user principals (account templates only)
+        # users          = ["alice@example.com"]
       }
       
       dev_baseline = {
@@ -139,6 +140,7 @@ locals {
         }
         template_names = ["development"]
         groups         = ["DevEngineers"]
+        # users         = ["bob@example.com"]
       }
     }
   }
@@ -150,7 +152,6 @@ module "sso_assignment" {
   source = "git::https://github.com/appvia/terraform-aws-sso-assignment.git"
 
   sso_instance_arn = local.sso_instance_arn
-  sso_account_tag_prefix = "sso"
   tags = {
     Project = "sso-assignment"
   }
@@ -188,6 +189,7 @@ locals {
         }
         template_names = ["managed_baseline"]
         groups         = ["Operations"]
+        # users        = ["platform-oncall@example.com"]
       }
     }
   }
@@ -206,7 +208,6 @@ module "sso_assignment" {
 
   name             = "my-org-sso"
   sso_instance_arn = local.sso_instance_arn
-  sso_account_tag_prefix = "sso"
   step_function_schedule = "rate(30 minutes)"
 
   lambda_timeout  = 120
@@ -250,7 +251,6 @@ module "sso_assignment" {
   source = "git::https://github.com/appvia/terraform-aws-sso-assignment.git"
 
   sso_instance_arn = local.sso_instance_arn
-  sso_account_tag_prefix = "sso"
 
   # Optional: publish lifecycle events (topic must already exist)
   events_sns_topic_arn = aws_sns_topic.assignment_events.arn
@@ -287,7 +287,7 @@ configuration = {
         # At least ONE of the following must be specified (others are optional)
         # All specified conditions must match (logical AND)
         
-        organizational_units = ["prod/*"]             # OU trailing path patterns — no leading slash (see matcher details below)
+        organizational_units = ["/prod/*"]            # OU path glob patterns (leading "/" required; see matcher details below)
         name_patterns        = ["prod-*", ".*-prod"]  # Account name glob/regex patterns (ANY can match)
         account_tags         = {                                 # Account tags (all must match)
           Environment = "Production"
@@ -301,42 +301,14 @@ configuration = {
 }
 ```
 
-### How member-account tags work
-
-1. **DynamoDB / Terraform** — `configuration.templates` is a map of **template name → permission set names** (and description / optional `enabled`). The map key is stored as `group_name` (e.g. `default`, `finance`).
-
-2. **Member account (Organizations)** — set a tag on the **account** resource (12-digit account ID) with:
-   - **Key**: `<prefix>/<template_name>` where `<prefix>` is the module input `sso_account_tag_prefix` (default **`Grant`**).
-     - If you want tags like `sso/default`, set `sso_account_tag_prefix = "sso"` on the root module (recommended for clarity).
-   - **Value**: comma-separated **Identity Center group *display names*** (must match the Identity Store `DisplayName` exactly) that should receive **all** permission sets from that template on **this** account.
-
-   You can set multiple template tags on one account, e.g. `Grant/default` and `Grant/finance` with different group lists.
-
-**Example tags on an account** (vending / account factory / CLI):
-
-```bash
-aws organizations tag-resource \
-  --resource-id 123456789012 \
-  --tags \
-    Key=Grant/default,Value=App-Developers,App-ReadOnly-Users \
-    Key=Grant/finance,Value=Finance-Approvers
-```
-
-**Inspect tags the Lambda will read:**
-
-```bash
-aws organizations list-tags-for-resource --resource-id 123456789012
-```
-
-Accounts with **no** `<prefix>/*` tags and **no matching account templates** get **no** assignments from this mechanism (the run still succeeds for other accounts). Add or adjust tags / matchers, then let the next scheduled run (or a Step Functions execution) reconcile assignments.
-
 ### Account Template Matcher Details
 
 **Organizational Units** — Match by trailing OU path with glob patterns:
-- The Lambda fetches the account's full OU path from AWS Organizations (e.g. `/data/development`), splits it on `/`, and drops the first segment, yielding a leading-slash-free string (e.g. `data/development`).
-- Patterns are matched against this stripped path using Python [`fnmatch`](https://docs.python.org/3/library/fnmatch.html) (shell-style globs: `*` matches any characters, `?` matches one character).
-- **Do not include a leading `/` in your patterns.** A pattern of `/data/*` will never match — use `data/*` instead.
-- An account in OU `/data/development` is matched by `data/*`, `data/development`, or `data/d*`.
+- The Lambda fetches the account's OU path from AWS Organizations (commonly like `/data/development`, but may also include a root id segment like `r-abc/...` depending on source).
+- Before matching, the OU path is normalized to a consistent form with a single leading `/` (e.g. `r-abc/ou-prod/ou-workloads` becomes `/ou-prod/ou-workloads`).
+- Patterns are matched against this normalized path using Python [`fnmatch`](https://docs.python.org/3/library/fnmatch.html) (shell-style globs: `*` matches any characters, `?` matches one character).
+- **Include the leading `/` in your patterns** (e.g. `"/data/*"`). Patterns without a leading `/` are not supported.
+- An account in OU `/data/development` is matched by `/data/*`, `/data/development`, or `/data/d*`.
 - At least one pattern must match for the condition to pass.
 
 **Account Name** — Match by account name with glob pattern:
@@ -374,8 +346,6 @@ module "config" {
 ### Configuration notes
 
 - **`configuration`** (on `modules/config`): Contains `templates` (top-level keys are template names) and optional `account_templates` (name → matcher + template references). See [modules/config/README.md](./modules/config/README.md).
-- **`sso_account_tag_prefix`** (root module, Terraform default `"Grant"`): tag keys on accounts are `<prefix>/<template_name>`.
-- **Backwards compatibility**: Older configurations using only tag-based assignment continue to work—just use `account_templates = {}` (or omit it, defaults to empty).
 
 ## Module layout
 
@@ -424,7 +394,6 @@ module "sso_assignment" {
   # provider = aws  # default provider
 
   sso_instance_arn        = var.sso_instance_arn
-  sso_account_tag_prefix  = "sso"
   step_function_schedule  = "rate(180 minutes)"
   # ... other inputs ...
 }
@@ -515,7 +484,7 @@ The module defines IAM for Lambda (DynamoDB read, SSO/Identity Store/Organizatio
 ### Account template not matching
 
 - Check account OU path: Use `aws organizations list-parents --child-id <account-id>` and build the full path
-- **OU pattern format**: The Lambda strips the leading `/` (and any root identifier) from the OU path before matching. An account in OU `/data/development` is matched as `data/development`. Your pattern must **not** include a leading slash — use `data/*`, not `/data/*`.
+- **OU pattern format**: OU matching uses `fnmatch` against a normalized OU path with a leading `/` (e.g. `/data/development`). Patterns must include a leading `/`, e.g. `"/data/*"`.
 - Check account name: Use `aws organizations describe-account --account-id <account-id>`
 - Check account tags: Use `aws organizations list-tags-for-resource --resource-id <account-id>`
 - Enable DEBUG logging: Check Lambda CloudWatch logs for detailed matcher debug output
@@ -572,7 +541,6 @@ See [LICENSE](./LICENSE).
 | <a name="input_lambda_timeout"></a> [lambda\_timeout](#input\_lambda\_timeout) | Lambda function timeout in seconds | `number` | `300` | no |
 | <a name="input_name"></a> [name](#input\_name) | Name for all resources i.e. handler, lambda, step function, event bridge, etc. | `string` | `"lz-sso"` | no |
 | <a name="input_sns_topic_arn"></a> [sns\_topic\_arn](#input\_sns\_topic\_arn) | ARN of SNS topic for Step Function notifications (if null, notifications disabled) | `string` | `null` | no |
-| <a name="input_sso_account_tag_prefix"></a> [sso\_account\_tag\_prefix](#input\_sso\_account\_tag\_prefix) | Account tag key prefix for permission-set templates. Keys are {prefix}/{template\_name} (e.g. sso/default) — see module README | `string` | `"Grant"` | no |
 | <a name="input_step_function_schedule"></a> [step\_function\_schedule](#input\_step\_function\_schedule) | EventBridge cron/rate schedule for Lambda execution | `string` | `"rate(180 minutes)"` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Common tags to apply to all resources | `map(string)` | `{}` | no |
 

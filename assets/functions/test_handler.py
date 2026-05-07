@@ -20,6 +20,7 @@ from libs.types import (
     Assignment,
     Binding,
     Group,
+    User,
     Permission,
     PermissionSet,
     Template,
@@ -296,6 +297,143 @@ class TestReconcileCreations:
             },
         )
 
+    def test_creates_user_assignments_for_binding_users(self):
+        identity_center = MagicMock()
+        tracking = MagicMock()
+        publisher = MagicMock()
+        handler.events_publisher = publisher
+
+        tracking.get_assignment_id.return_value = "a-1"
+
+        bindings = [
+            Binding(
+                account_id="111111111111",
+                permission_set_name="PS1",
+                permission_set_arn="arn:ps1",
+                groups=[],
+                users=[User(name="alice@example.com", id="u-1")],
+                template_name="tpl",
+            )
+        ]
+
+        successes, failures = handler.reconcile_creations(
+            bindings=bindings,
+            identity_center=identity_center,
+            tracking=tracking,
+        )
+
+        assert not failures
+        assert successes == [
+            {
+                "account_id": "111111111111",
+                "group_name": "alice@example.com",
+                "permission_set_arn": "arn:ps1",
+                "permission_set_name": "PS1",
+            }
+        ]
+        identity_center.create_assignment.assert_called_once_with(
+            account_id="111111111111",
+            permission_set_arn="arn:ps1",
+            permission_set_name="PS1",
+            principal_id="u-1",
+            principal_type="USER",
+        )
+        tracking.create.assert_called_once_with(
+            account_id="111111111111",
+            group_name="alice@example.com",
+            permission_set_arn="arn:ps1",
+            permission_set_name="PS1",
+            principal_id="u-1",
+            principal_type="USER",
+            template_name="tpl",
+        )
+        publisher.publish.assert_called_once()
+
+
+class TestBuildBindingsAgainstConfiguration:
+    def test_multi_account_dataset_tags_name_ou_and_account_templates_users(self):
+        """
+        Validate matching logic across a small corpus of accounts:
+        - account_templates by OU and name patterns
+        - account_templates users list is carried into desired bindings
+        """
+        identity_center = MagicMock()
+
+        # Permission set template in config
+        cfg = MagicMock()
+        cfg.templates = {
+            "administrators": Template(
+                permission_sets=["AdminPS"],
+                description="",
+            )
+        }
+        cfg.account_templates = {
+            "prod-adhoc": AccountTemplate(
+                name="prod-adhoc",
+                description="",
+                matcher=AccountTemplateMatcher(
+                    organizational_units=["/prod/*"],
+                    name_patterns=["prod-*"],
+                    account_tags={"Environment": "Production"},
+                ),
+                excluded=[],
+                template_names=["administrators"],
+                groups=["G-Admins"],
+                users=["alice@example.com"],
+            )
+        }
+
+        # Identity Center fixtures
+        identity_center.has_group.side_effect = lambda name: name in {
+            "G-Admins",
+            "TagGroup",
+        }
+        identity_center.get_group.side_effect = lambda name: Group(
+            name=name, id=f"gid:{name}"
+        )
+        identity_center.get_permission_set.return_value = PermissionSet(
+            name="AdminPS", arn="arn:ps:admin"
+        )
+        identity_center.get_user.side_effect = lambda ident: (
+            User(name=ident, id="uid:alice") if ident == "alice@example.com" else None
+        )
+
+        accounts = [
+            # Matches account template (OU+name+tag), should get group + user binding
+            Account(
+                id="111",
+                name="prod-app-1",
+                tags={"Environment": "Production"},
+                organizational_unit_path="/prod/apps",
+            ),
+            # Does not match the account template: should produce no bindings
+            Account(
+                id="222",
+                name="dev-app-1",
+                tags={"Environment": "Development"},
+                organizational_unit_path="/dev/apps",
+            ),
+        ]
+
+        all_bindings: list[Binding] = []
+
+        b1, _, _ = handler.build_account_bindings(
+            account=accounts[0], configuration=cfg, identity_center=identity_center
+        )
+        all_bindings.extend(b1)
+
+        b2, _, _ = handler.build_account_bindings(
+            account=accounts[1], configuration=cfg, identity_center=identity_center
+        )
+        all_bindings.extend(b2)
+
+        # Assertions: prod binding includes both group + user
+        prod_binding = next(b for b in all_bindings if b.account_id == "111")
+        assert [g.name for g in prod_binding.groups] == ["G-Admins"]
+        assert [u.name for u in prod_binding.users] == ["alice@example.com"]
+
+        assert not any(b.account_id == "222" for b in all_bindings)
+
 
 class TestReconcileDeletions:
     def test_returns_empty_when_no_tracked_assignments(self):
@@ -514,14 +652,14 @@ class _IdentityCenterStub:
         return PermissionSet(name=name, arn=arn)
 
 
-class TestBuildPermissionBindings:
+class TestBuildBindings:
     def test_fails_when_template_missing(self):
         acct = Account(id="1", tags={})
         cfg = _ConfigStub(templates={})
         ic = _IdentityCenterStub(
             groups={"G1": "g1"}, permission_sets={"PS1": "arn:ps1"}
         )
-        bindings, successes, failures = handler.build_permission_bindings(
+        bindings, successes, failures = handler.build_permissions(
             account=acct,
             configuration=cfg,
             identity_center=ic,
@@ -535,10 +673,8 @@ class TestBuildPermissionBindings:
         )
 
 
-class TestBuildPermissionBindingsFromAccountTags:
-    def test_creates_expected_bindings_for_multiple_accounts_and_templates_from_tags(
-        self,
-    ):
+class TestBuildBindingsMultiplePermissions:
+    def test_creates_expected_bindings_for_multiple_accounts_and_templates(self):
         cfg = _ConfigStub(
             templates={
                 "tplA": Template(permission_sets=["PS1", "PS2"]),
@@ -550,30 +686,28 @@ class TestBuildPermissionBindingsFromAccountTags:
             permission_sets={"PS1": "arn:ps1", "PS2": "arn:ps2"},
         )
 
-        a1 = Account(
-            id="111111111111",
-            name="a1",
-            tags={"sso/tplA": "G1,G2"},
-            organizational_unit_path="r/ou",
-        )
-        a2 = Account(
-            id="222222222222",
-            name="a2",
-            tags={"sso/tplB": "G3"},
-            organizational_unit_path="r/ou",
-        )
-
         all_bindings: list[Binding] = []
         all_failures: list[dict] = []
 
-        for acct in (a1, a2):
-            for perm in acct.get_permission_tags(prefix="sso"):
-                bindings, successes, failures = handler.build_permission_bindings(
-                    account=acct, configuration=cfg, identity_center=ic, permission=perm
-                )
-                assert not successes
-                all_bindings.extend(bindings)
-                all_failures.extend(failures)
+        bindings, successes, failures = handler.build_permissions(
+            account=Account(id="111111111111", name="a1"),
+            configuration=cfg,
+            identity_center=ic,
+            permission=Permission(name="tplA", groups=["G1", "G2"]),
+        )
+        assert not successes
+        all_bindings.extend(bindings)
+        all_failures.extend(failures)
+
+        bindings, successes, failures = handler.build_permissions(
+            account=Account(id="222222222222", name="a2"),
+            configuration=cfg,
+            identity_center=ic,
+            permission=Permission(name="tplB", groups=["G3"]),
+        )
+        assert not successes
+        all_bindings.extend(bindings)
+        all_failures.extend(failures)
 
         assert not all_failures
         assert [
@@ -590,25 +724,20 @@ class TestBuildPermissionBindingsFromAccountTags:
             ("222222222222", "PS2", ["g-3"], "tplB"),
         ]
 
-    def test_missing_group_in_tag_value_produces_failure_but_still_builds_bindings_with_existing_groups(
+    def test_missing_group_produces_failure_but_still_builds_bindings_with_existing_groups(
         self,
     ):
         cfg = _ConfigStub(templates={"tplA": Template(permission_sets=["PS1"])})
         ic = _IdentityCenterStub(
             groups={"G1": "g-1"}, permission_sets={"PS1": "arn:ps1"}
         )
-        acct = Account(
-            id="111111111111",
-            name="a1",
-            tags={"sso/tplA": "G1,MissingGroup"},
-            organizational_unit_path="r/ou",
-        )
+        acct = Account(id="111111111111", name="a1")
 
-        perms = acct.get_permission_tags(prefix="sso")
-        assert len(perms) == 1
-
-        bindings, successes, failures = handler.build_permission_bindings(
-            account=acct, configuration=cfg, identity_center=ic, permission=perms[0]
+        bindings, successes, failures = handler.build_permissions(
+            account=acct,
+            configuration=cfg,
+            identity_center=ic,
+            permission=Permission(name="tplA", groups=["G1", "MissingGroup"]),
         )
 
         assert not successes
@@ -636,16 +765,12 @@ class TestBuildPermissionBindingsFromAccountTags:
         ic = _IdentityCenterStub(
             groups={"G1": "g-1"}, permission_sets={"PS1": "arn:ps1"}
         )
-        acct = Account(
-            id="111111111111",
-            name="a1",
-            tags={"sso/tplA": "G1"},
-            organizational_unit_path="r/ou",
-        )
-
-        perm = acct.get_permission_tags(prefix="sso")[0]
-        bindings, successes, failures = handler.build_permission_bindings(
-            account=acct, configuration=cfg, identity_center=ic, permission=perm
+        acct = Account(id="111111111111", name="a1")
+        bindings, successes, failures = handler.build_permissions(
+            account=acct,
+            configuration=cfg,
+            identity_center=ic,
+            permission=Permission(name="tplA", groups=["G1"]),
         )
 
         assert not successes
@@ -658,23 +783,20 @@ class TestBuildPermissionBindingsFromAccountTags:
             }
         ]
 
-    def test_missing_template_referenced_by_account_tags_returns_no_bindings_and_failure(
+    def test_missing_template_returns_no_bindings_and_failure(
         self,
     ):
         cfg = _ConfigStub(templates={"tplA": Template(permission_sets=["PS1"])})
         ic = _IdentityCenterStub(
             groups={"G1": "g-1"}, permission_sets={"PS1": "arn:ps1"}
         )
-        acct = Account(
-            id="111111111111",
-            name="a1",
-            tags={"sso/does-not-exist": "G1"},
-            organizational_unit_path="r/ou",
-        )
+        acct = Account(id="111111111111", name="a1")
 
-        perm = acct.get_permission_tags(prefix="sso")[0]
-        bindings, successes, failures = handler.build_permission_bindings(
-            account=acct, configuration=cfg, identity_center=ic, permission=perm
+        bindings, successes, failures = handler.build_permissions(
+            account=acct,
+            configuration=cfg,
+            identity_center=ic,
+            permission=Permission(name="does-not-exist", groups=["G1"]),
         )
 
         assert not bindings
@@ -688,7 +810,7 @@ class TestBuildPermissionBindingsFromAccountTags:
         ]
 
 
-class TestBuildAccountBindings:
+class TestBindings:
     def test_returns_empty_when_no_account_templates(self):
         acct = Account(
             id="1", name="a", tags={}, organizational_unit_path="r-root/ou-1"
@@ -707,7 +829,7 @@ class TestBuildAccountBindings:
         assert not failures
 
 
-class TestBuildAccountBindingsFromAccountTemplates:
+class TestBindingsFromAccountTemplates:
     def test_creates_bindings_for_accounts_matching_ou_name_and_tag_templates(self):
         cfg = _ConfigStub(
             templates={
@@ -717,7 +839,7 @@ class TestBuildAccountBindingsFromAccountTemplates:
             account_templates={
                 "prod-by-ou": AccountTemplate(
                     name="prod-by-ou",
-                    matcher=AccountTemplateMatcher(organizational_units=["prod/*"]),
+                    matcher=AccountTemplateMatcher(organizational_units=["/prod/*"]),
                     template_names=["tplA"],
                     groups=["G1"],
                 ),
@@ -741,19 +863,19 @@ class TestBuildAccountBindingsFromAccountTemplates:
             id="111111111111",
             name="prod-app",
             tags={},
-            organizational_unit_path="r-root/prod/apps",
+            organizational_unit_path="/prod/apps",
         )
         sandbox_acct = Account(
             id="222222222222",
             name="sandbox-foo",
             tags={"Environment": "Sandbox"},
-            organizational_unit_path="r-root/sandbox",
+            organizational_unit_path="/sandbox",
         )
         unmatched = Account(
             id="333333333333",
             name="dev-foo",
             tags={"Environment": "Sandbox"},
-            organizational_unit_path="r-root/dev",
+            organizational_unit_path="/dev",
         )
 
         b1, s1, f1 = handler.build_account_bindings(
@@ -798,7 +920,7 @@ class TestBuildAccountBindingsFromAccountTemplates:
             account_templates={
                 "prod": AccountTemplate(
                     name="prod",
-                    matcher=AccountTemplateMatcher(organizational_units=["prod/*"]),
+                    matcher=AccountTemplateMatcher(organizational_units=["/prod/*"]),
                     template_names=["tplA", "tplMissing"],
                     groups=["G1"],
                 )
@@ -811,7 +933,7 @@ class TestBuildAccountBindingsFromAccountTemplates:
             id="111111111111",
             name="prod-app",
             tags={},
-            organizational_unit_path="r-root/prod/apps",
+            organizational_unit_path="/prod/apps",
         )
 
         bindings, successes, failures = handler.build_account_bindings(
@@ -838,7 +960,7 @@ class TestBuildAccountBindingsFromAccountTemplates:
             account_templates={
                 "prod": AccountTemplate(
                     name="prod",
-                    matcher=AccountTemplateMatcher(organizational_units=["prod/*"]),
+                    matcher=AccountTemplateMatcher(organizational_units=["/prod/*"]),
                     template_names=["tplA"],
                     groups=["G1", "MissingGroup"],
                 )
@@ -851,7 +973,7 @@ class TestBuildAccountBindingsFromAccountTemplates:
             id="111111111111",
             name="prod-app",
             tags={},
-            organizational_unit_path="r-root/prod/apps",
+            organizational_unit_path="/prod/apps",
         )
 
         bindings, successes, failures = handler.build_account_bindings(
@@ -882,7 +1004,7 @@ class TestBuildAccountBindingsFromAccountTemplates:
             account_templates={
                 "bad-exclude": AccountTemplate(
                     name="bad-exclude",
-                    matcher=AccountTemplateMatcher(organizational_units=["prod/*"]),
+                    matcher=AccountTemplateMatcher(organizational_units=["/prod/*"]),
                     excluded=["*("],
                     template_names=["tplA"],
                     groups=["G1"],
@@ -896,7 +1018,7 @@ class TestBuildAccountBindingsFromAccountTemplates:
             id="111111111111",
             name="prod-app",
             tags={},
-            organizational_unit_path="r-root/prod/apps",
+            organizational_unit_path="/prod/apps",
         )
 
         bindings, successes, failures = handler.build_account_bindings(
@@ -912,23 +1034,22 @@ class TestBuildAccountBindingsFromAccountTemplates:
 
 
 class TestBindingCreationAcrossAccounts:
-    def test_lambda_handler_builds_expected_bindings_from_account_tags(self):
+    def test_lambda_handler_builds_expected_bindings_from_account_templates(self):
         os.environ["DYNAMODB_CONFIG_TABLE"] = "cfg"
         os.environ["DYNAMODB_TRACKING_TABLE"] = "tracking"
         os.environ["SSO_INSTANCE_ARN"] = "arn:i"
-        os.environ["SSO_ACCOUNT_TAG_PREFIX"] = "x"
 
         accounts = [
             Account(
                 id="111111111111",
                 name="a1",
-                tags={"x/tpl": "G1,G2"},
+                tags={"Environment": "Production"},
                 organizational_unit_path="r-root/ou-1",
             ),
             Account(
                 id="222222222222",
                 name="a2",
-                tags={"x/tpl": "G2"},
+                tags={"Environment": "Production"},
                 organizational_unit_path="r-root/ou-2",
             ),
         ]
@@ -937,7 +1058,16 @@ class TestBindingCreationAcrossAccounts:
             def __init__(self, table_name: str, **_kwargs):
                 self.table_name = table_name
                 self.templates = {"tpl": Template(permission_sets=["PS1", "PS2"])}
-                self.account_templates = {}
+                self.account_templates = {
+                    "prod-baseline": AccountTemplate(
+                        name="prod-baseline",
+                        matcher=AccountTemplateMatcher(
+                            account_tags={"Environment": "Production"}
+                        ),
+                        template_names=["tpl"],
+                        groups=["G1", "G2"],
+                    )
+                }
 
             def load(self) -> None:
                 return None

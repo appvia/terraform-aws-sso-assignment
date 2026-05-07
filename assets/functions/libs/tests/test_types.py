@@ -13,6 +13,7 @@ from libs.types import (
     Binding,
     Configuration,
     Group,
+    User,
     Permission,
     PermissionSet,
     Template,
@@ -38,38 +39,27 @@ class TestBinding:
             permission_set_name="Admin",
             permission_set_arn="arn:ps:1",
             groups=[Group(name="TeamA", id="g-1")],
+            users=[User(name="alice@example.com", id="u-1")],
             template_name="tpl",
         )
         data = json.loads(b.to_json())
         assert data["account_id"] == "123456789012"
         assert data["template_name"] == "tpl"
         assert data["groups"] == [{"name": "TeamA", "id": "g-1"}]
+        assert data["users"] == [{"name": "alice@example.com", "id": "u-1"}]
 
 
 class TestPermission:
     def test_to_json(self):
-        p = Permission(name="default", groups=["A", "B"])
-        assert json.loads(p.to_json()) == {"name": "default", "groups": ["A", "B"]}
+        p = Permission(name="default", groups=["A", "B"], users=["u1"])
+        assert json.loads(p.to_json()) == {
+            "name": "default",
+            "groups": ["A", "B"],
+            "users": ["u1"],
+        }
 
 
 class TestAccount:
-    def test_get_permission_tags_filters_and_splits(self):
-        acct = Account(
-            id="123456789012",
-            name="acct",
-            tags={
-                "sso/default": " Alpha , Beta , ,",
-                "other": "x",
-                "sso/security": "Gamma",
-            },
-        )
-        perms = acct.get_permission_tags("sso")
-        by_name = {p.name: p.groups for p in perms}
-        assert by_name == {
-            "default": ["Alpha", "Beta"],
-            "security": ["Gamma"],
-        }
-
     def test_to_json(self):
         acct = Account(id="1", name="n", tags={"k": "v"}, organizational_unit_path="ou/x")
         data = json.loads(acct.to_json())
@@ -108,7 +98,7 @@ class TestAssignment:
 class TestAccountTemplateMatcher:
     def test_matches_all_conditions(self):
         matcher = AccountTemplateMatcher(
-            organizational_units=["ou-prod/ou-workloads*"],
+            organizational_units=["/ou-prod/ou-workloads*"],
             name_pattern="prod-*",
             account_tags={"Environment": "Production"},
         )
@@ -116,7 +106,7 @@ class TestAccountTemplateMatcher:
             id="1",
             name="prod-app-1",
             tags={"Environment": "Production", "CostCenter": "Eng"},
-            organizational_unit_path="r-abc/ou-prod/ou-workloads/ou-team1",
+            organizational_unit_path="/ou-prod/ou-workloads/ou-team1",
         )
         assert matcher.matches(acct) is True
 
@@ -143,12 +133,20 @@ class TestAccountTemplateMatcher:
         assert matcher.matches(acct_value_mismatch) is False
 
     def test_matches_organizational_unit_trailing_path(self):
-        matcher = AccountTemplateMatcher(organizational_units=["ou-prod/ou-workloads"])
-        assert matcher.matches_organizational_unit("r-abc/ou-prod/ou-workloads", ["ou-prod/ou-workloads"]) is True
-        assert matcher.matches_organizational_unit("r-abc/ou-dev/ou-workloads", ["ou-prod/*"]) is False
+        matcher = AccountTemplateMatcher(organizational_units=["/ou-prod/ou-workloads"])
+        assert (
+            matcher.matches_organizational_unit(
+                "/ou-prod/ou-workloads", ["/ou-prod/ou-workloads"]
+            )
+            is True
+        )
+        assert (
+            matcher.matches_organizational_unit("/ou-dev/ou-workloads", ["/ou-prod/*"])
+            is False
+        )
 
     def test_matches_organizational_unit_for_leading_slash_paths_and_globs(self):
-        matcher = AccountTemplateMatcher(organizational_units=["workloads/*"])
+        matcher = AccountTemplateMatcher(organizational_units=["/workloads/*"])
         acct = Account(
             id="1",
             name="TestAccount",
@@ -158,7 +156,7 @@ class TestAccountTemplateMatcher:
         assert matcher.matches(acct) is True
 
     def test_matches_organizational_unit_for_exact_trailing_path(self):
-        matcher = AccountTemplateMatcher(organizational_units=["workloads/development"])
+        matcher = AccountTemplateMatcher(organizational_units=["/workloads/development"])
         acct = Account(
             id="1",
             name="TestAccount",
@@ -168,7 +166,7 @@ class TestAccountTemplateMatcher:
         assert matcher.matches(acct) is True
 
     def test_matches_organizational_unit_negative_when_path_does_not_match(self):
-        matcher = AccountTemplateMatcher(organizational_units=["workspaces/*"])
+        matcher = AccountTemplateMatcher(organizational_units=["/workspaces/*"])
         acct = Account(
             id="1",
             name="TestAccount",
@@ -203,11 +201,13 @@ class TestAccountTemplate:
             matcher=AccountTemplateMatcher(name_pattern="prod-*"),
             template_names=["default"],
             groups=["TeamA"],
+            users=["alice@example.com"],
             description="d",
         )
         data = json.loads(at.to_json())
         assert data["name"] == "baseline"
         assert data["template_names"] == ["default"]
+        assert data["users"] == ["alice@example.com"]
 
 
 class TestConfiguration:
@@ -227,10 +227,11 @@ class TestConfiguration:
                     "matcher": {
                         "name_pattern": "prod-*",
                         "name_patterns": ["prod-*-*"],
-                        "organizational_units": ["ou-prod/*"],
+                        "organizational_units": ["/ou-prod/*"],
                         "account_tags": {"Environment": "Production"},
                     },
                     "excluded": [r"^111111111111$", r"^prod-secret-.*$"],
+                    "users": ["alice@example.com", "bob@example.com"],
                 },
             ]
         }
@@ -247,6 +248,10 @@ class TestConfiguration:
         assert cfg.account_templates["prod-baseline"].matcher.name_pattern == "prod-*"
         assert cfg.account_templates["prod-baseline"].matcher.name_patterns == ["prod-*-*"]
         assert cfg.account_templates["prod-baseline"].excluded == [r"^111111111111$", r"^prod-secret-.*$"]
+        assert cfg.account_templates["prod-baseline"].users == [
+            "alice@example.com",
+            "bob@example.com",
+        ]
 
     def test_load_paginates_until_last_evaluated_key_absent(self):
         fake_table = MagicMock()

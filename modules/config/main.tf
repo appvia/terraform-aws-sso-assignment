@@ -69,6 +69,11 @@ resource "aws_dynamodb_table_item" "account_templates" {
         L = [for group in each.value.groups : { S = group }]
       }
     },
+    length(try(each.value.users, [])) > 0 ? {
+      users = {
+        L = [for user in each.value.users : { S = user }]
+      }
+    } : {},
     each.value.excluded != null ? {
       excluded = {
         L = [for r in each.value.excluded : { S = r }]

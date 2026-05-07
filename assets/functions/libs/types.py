@@ -22,6 +22,17 @@ class Group:
 
 
 @dataclass
+class User:
+    # The user identifier as configured (e.g., email or username)
+    name: str = field(default_factory=lambda: "")
+    # The user ID in the Identity Store
+    id: str = field(default_factory=lambda: "")
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), default=str)
+
+
+@dataclass
 class PermissionSet:
     # The permission set name
     name: str = field(default_factory=lambda: "")
@@ -43,6 +54,8 @@ class Binding:
     permission_set_arn: str = field(default_factory=lambda: "")
     # The groups to assign the permission set to
     groups: list[Group] = field(default_factory=lambda: [])
+    # The users to assign the permission set to (account_templates only)
+    users: list[User] = field(default_factory=lambda: [])
     # The name of the template this binding came from
     template_name: str = field(default_factory=lambda: "")
 
@@ -56,6 +69,8 @@ class Permission:
     name: str = field(default_factory=lambda: "")
     # The groups to assign the permission set to
     groups: list[str] = field(default_factory=lambda: [])
+    # The users to assign the permission set to (account_templates only)
+    users: list[str] = field(default_factory=lambda: [])
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), default=str)
@@ -71,32 +86,6 @@ class Account:
     tags: dict[str, str] = field(default_factory=lambda: {})
     # The account organizational unit path
     organizational_unit_path: str = field(default_factory=lambda: "")
-
-    def get_permission_tags(self, prefix: str) -> list[Permission]:
-        """
-        Return a list of permissions for the account.
-
-        Args:
-            prefix: The prefix of the permission tags
-
-        Returns:
-            A list of permissions for the account
-        """
-
-        # Initialize the list to store the permissions
-        permissions: list[Permission] = []
-
-        for key, value in self.tags.items():
-            if key.startswith(prefix):
-                permission: Permission = Permission(
-                    name=key.split("/")[1],
-                    groups=[
-                        group.strip() for group in value.split(",") if group.strip()
-                    ],
-                )
-                permissions.append(permission)
-
-        return permissions
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), default=str)
@@ -164,6 +153,7 @@ class Configuration:
                         excluded=item.get("excluded", []) or [],
                         template_names=item.get("template_names", []) or [],
                         groups=item.get("groups", []) or [],
+                        users=item.get("users", []) or [],
                         description=item.get("description", "") or "",
                     )
                 else:
@@ -276,8 +266,11 @@ class AccountTemplateMatcher:
         """
         Match account organizational unit against glob patterns (trailing path matching).
 
-        The account_ou is typically in format: r-xxxx/ou-prod/ou-workloads
-        The patterns are trailing paths like: "prod/workloads/*" or "production/accounts/*"
+        `account_ou` is expected to be a leading-slash OU path like "/data" or
+        "/data/development".
+
+        Patterns are glob patterns (Python `fnmatch`) and must include a leading "/",
+        e.g. "/data/*".
 
         Args:
             account_ou: The full OU path from AWS Organizations
@@ -289,19 +282,31 @@ class AccountTemplateMatcher:
         if not account_ou or not patterns:
             return False
 
-        # Extract the trailing path from the full OU path
-        # Example: "r-xxxx/ou-prod/ou-workloads" -> "prod/workloads"
-        ou_parts = account_ou.split("/")[1:]  # Skip root identifier
-        ou_trailing = "/".join(ou_parts)
+        account_ou = account_ou.strip()
+        if not account_ou.startswith("/"):
+            return False
 
-        # Match against any of the patterns
+        # Iterate over the patterns
         for pattern in patterns:
-            if fnmatch.fnmatch(ou_trailing, pattern):
+            if not pattern or not pattern.startswith("/"):
                 logger.debug(
-                    "OU matched",
+                    "Skipping OU pattern without leading slash",
                     extra={
                         "action": "match_organizational_unit",
-                        "ou_trailing": ou_trailing,
+                        "account_ou": account_ou,
+                        "pattern": pattern,
+                        "matched": False,
+                    },
+                )
+                continue
+
+            matched = fnmatch.fnmatch(account_ou, pattern)
+            if matched:
+                logger.debug(
+                    "Account organizational unit matched",
+                    extra={
+                        "action": "match_organizational_unit",
+                        "account_ou": account_ou,
                         "pattern": pattern,
                         "matched": True,
                     },
@@ -309,10 +314,10 @@ class AccountTemplateMatcher:
                 return True
 
         logger.debug(
-            "OU did not match any patterns",
+            "Account organizational unit did not match any patterns",
             extra={
                 "action": "match_organizational_unit",
-                "ou_trailing": ou_trailing,
+                "account_ou": account_ou,
                 "patterns": patterns,
                 "matched": False,
             },
@@ -433,6 +438,8 @@ class AccountTemplate:
     template_names: list[str] = field(default_factory=list)
     # List of groups from those templates to assign
     groups: list[str] = field(default_factory=list)
+    # List of users (identifiers) to assign (account_templates only)
+    users: list[str] = field(default_factory=list)
     # Human-readable description
     description: str = field(default_factory=lambda: "")
 

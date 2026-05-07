@@ -74,7 +74,7 @@ run "creates_items_for_account_templates" {
           template_names = ["prod"]
           groups         = ["ProdEngineers", "ProdAdmins"]
           matcher = {
-            organizational_units = ["prod/workloads/*"]
+            organizational_units = ["/prod/workloads/*"]
           }
         }
       }

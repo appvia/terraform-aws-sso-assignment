@@ -5,7 +5,7 @@ import time
 
 from .logging import logger
 from .errors import HandlerError
-from .types import Group, PermissionSet
+from .types import Group, PermissionSet, User
 
 
 @dataclass
@@ -26,6 +26,8 @@ class IdentityCenter:
     poll_interval_seconds: float = field(default_factory=lambda: 1.5)
     # The Identity Store ID
     identity_store_id: str = field(default_factory=lambda: "")
+    # Cache of resolved users keyed by configured identifier
+    users_by_identifier: dict[str, User] = field(default_factory=dict)
 
     def __init__(self, instance_arn: str, region_name: str = "eu-west-2"):
         # Set the instance ARN
@@ -46,12 +48,68 @@ class IdentityCenter:
         self.permission_sets = []
         # Initialize the Identity Store ID
         self.identity_store_id = ""
+        # Initialize the user cache
+        self.users_by_identifier = {}
         # Initialize the Identity Store ID
         self.identity_store_id = self.get_identity_store_id()
         # Cache the groups and permission sets
         self.groups = self.list_groups()
         # Cache the permission sets
         self.permission_sets = self.list_permission_sets()
+
+
+    def has_user(self, user_identifier: str) -> bool:
+        """
+        Check if a user exists in the Identity Store by identifier.
+
+        The identifier should follow the module convention (e.g., email or username).
+        """
+        return self.get_user(user_identifier) is not None
+
+
+    def get_user(self, user_identifier: str) -> User | None:
+        """
+        Resolve a user identifier to an Identity Store user id.
+
+        This uses `identitystore:GetUserId` with a small set of supported
+        attribute paths to avoid directory-wide scans.
+        """
+        user_identifier = (user_identifier or "").strip()
+        if not user_identifier:
+            return None
+
+        if user_identifier in self.users_by_identifier:
+            return self.users_by_identifier[user_identifier]
+
+        # Try common identity store attribute paths. Which one works depends on
+        # how the Identity Center directory is populated.
+        attribute_paths = [
+            # Username
+            "UserName",
+            # Primary email (common for SCIM-synced identities)
+            "Emails.Value",
+        ]
+
+        for attribute_path in attribute_paths:
+            try:
+                resp = self.identitystore_client.get_user_id(
+                    IdentityStoreId=self.identity_store_id,
+                    AlternateIdentifier={
+                        "UniqueAttribute": {
+                            "AttributePath": attribute_path,
+                            "AttributeValue": user_identifier,
+                        }
+                    },
+                )
+                user_id = resp.get("UserId")
+                if user_id:
+                    user = User(name=user_identifier, id=user_id)
+                    self.users_by_identifier[user_identifier] = user
+                    return user
+            except Exception:
+                continue
+
+        return None
 
 
     def get_identity_store_id(self) -> str:

@@ -31,7 +31,9 @@ variable "configuration" {
       template_names = list(string)
       # List of groups from those templates to assign
       # These groups will receive the permission sets defined in the templates
-      groups = list(string)
+      groups = optional(list(string), [])
+      # List of users (identifiers) to assign directly (account_templates only)
+      users = optional(list(string), [])
       # Matcher conditions (logical AND: all specified conditions must match)
       matcher = object({
         # Match by organizational unit trailing path with glob patterns
@@ -71,6 +73,14 @@ variable "configuration" {
       ])
     ])
     error_message = "All template_names in account_templates must reference existing templates"
+  }
+
+  validation {
+    condition = alltrue([
+      for acct_tmpl in var.configuration.account_templates :
+      length(try(acct_tmpl.groups, [])) > 0 || length(try(acct_tmpl.users, [])) > 0
+    ])
+    error_message = "Each account_templates entry must specify at least one principal list (groups and/or users)"
   }
 }
 
