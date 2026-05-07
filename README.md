@@ -339,6 +339,7 @@ module "config" {
 ### Configuration notes
 
 - **`configuration`** (on `modules/config`): Contains `templates` (top-level keys are template names) and optional `account_templates` (name → matcher + template references). See [modules/config/README.md](./modules/config/README.md).
+- **Duplicate assignments**: If multiple `account_templates` (or multiple `template_names` within them) result in the same effective assignment for an account (same account + permission set + principal), the Lambda will **keep the first** assignment encountered and **log a warning** for duplicates. Account templates and their referenced `template_names` are processed in **alphabetical order** to make this deterministic.
 
 ## Module layout
 

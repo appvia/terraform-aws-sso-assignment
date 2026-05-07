@@ -297,6 +297,61 @@ class TestReconcileCreations:
             },
         )
 
+    def test_duplicate_desired_assignment_is_ignored_and_warned(self):
+        identity_center = MagicMock()
+        tracking = MagicMock()
+        handler.events_publisher = MagicMock()
+
+        bindings = [
+            Binding(
+                account_id="111111111111",
+                permission_set_name="PS1",
+                permission_set_arn="arn:ps1",
+                groups=[Group(name="G1", id="g-1")],
+                template_name="tpl-a",
+            ),
+            # Duplicate of the above (same account + permission set + principal)
+            Binding(
+                account_id="111111111111",
+                permission_set_name="PS1",
+                permission_set_arn="arn:ps1",
+                groups=[Group(name="G1", id="g-1")],
+                template_name="tpl-b",
+            ),
+        ]
+
+        with patch.object(handler.logger, "warning") as warn:
+            successes, failures = handler.reconcile_creations(
+                bindings=bindings,
+                identity_center=identity_center,
+                tracking=tracking,
+            )
+
+        assert not failures
+        assert successes == [
+            {
+                "account_id": "111111111111",
+                "group_name": "G1",
+                "permission_set_arn": "arn:ps1",
+                "permission_set_name": "PS1",
+            }
+        ]
+
+        identity_center.create_assignment.assert_called_once_with(
+            account_id="111111111111",
+            permission_set_arn="arn:ps1",
+            permission_set_name="PS1",
+            principal_id="g-1",
+            principal_type="GROUP",
+        )
+        tracking.create.assert_called_once()
+        handler.events_publisher.publish.assert_called_once()
+
+        warn.assert_called_once()
+        _, kwargs = warn.call_args
+        assert kwargs["extra"]["kept_template_name"] == "tpl-a"
+        assert kwargs["extra"]["ignored_template_name"] == "tpl-b"
+
     def test_creates_user_assignments_for_binding_users(self):
         identity_center = MagicMock()
         tracking = MagicMock()
@@ -913,6 +968,49 @@ class TestBindingsFromAccountTemplates:
         assert not b3
         assert not s3
         assert not f3
+
+    def test_account_template_iteration_is_deterministic(self):
+        cfg = _ConfigStub(
+            templates={
+                "tplA": Template(permission_sets=["PS1"]),
+                "tplB": Template(permission_sets=["PS2"]),
+            },
+            account_templates={
+                # Intentionally unsorted keys; build_account_bindings should process
+                # these deterministically (alphabetically by key).
+                "z-template": AccountTemplate(
+                    name="z-template",
+                    matcher=AccountTemplateMatcher(name_pattern="*"),
+                    template_names=["tplB"],
+                    groups=["G2"],
+                ),
+                "a-template": AccountTemplate(
+                    name="a-template",
+                    matcher=AccountTemplateMatcher(name_pattern="*"),
+                    template_names=["tplA"],
+                    groups=["G1"],
+                ),
+            },
+        )
+        ic = _IdentityCenterStub(
+            groups={"G1": "g-1", "G2": "g-2"},
+            permission_sets={"PS1": "arn:ps1", "PS2": "arn:ps2"},
+        )
+        acct = Account(id="111111111111", name="any", tags={}, organizational_unit_path="/")
+
+        bindings, successes, failures = handler.build_account_bindings(
+            account=acct, configuration=cfg, identity_center=ic
+        )
+
+        assert not successes
+        assert not failures
+        assert [
+            (b.permission_set_name, [g.id for g in b.groups], b.template_name)
+            for b in bindings
+        ] == [
+            ("PS1", ["g-1"], "tplA"),
+            ("PS2", ["g-2"], "tplB"),
+        ]
 
     def test_missing_template_referenced_by_account_template_populates_failures(self):
         cfg = _ConfigStub(

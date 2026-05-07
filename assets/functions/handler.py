@@ -137,6 +137,10 @@ def reconcile_creations(
     successes: list[dict[str, Any]] = []
     # Initialize the list to store the failures
     failures: list[dict[str, Any]] = []
+    # Deduplicate effective desired assignments so we don't overwrite tracking
+    # metadata or emit duplicate events when multiple sources generate the same
+    # account+permission_set+principal combination.
+    seen_assignment_keys: dict[str, str] = {}
 
     # Assign the permission set to the principals (groups + users)
     for binding in bindings:
@@ -145,6 +149,28 @@ def reconcile_creations(
         principals.extend([("USER", u.id, u.name) for u in binding.users])
 
         for principal_type, principal_id, principal_name in principals:
+            assignment_key = (
+                f"{binding.account_id}#{binding.permission_set_arn}#"
+                f"{principal_type}#{principal_id}"
+            )
+            if assignment_key in seen_assignment_keys:
+                logger.warning(
+                    "Duplicate desired assignment detected; ignoring",
+                    extra={
+                        "action": "assign_permissions",
+                        "account_id": binding.account_id,
+                        "permission_set_name": binding.permission_set_name,
+                        "permission_set_arn": binding.permission_set_arn,
+                        "principal_id": principal_id,
+                        "principal_type": principal_type,
+                        "principal_name": principal_name,
+                        "kept_template_name": seen_assignment_keys[assignment_key],
+                        "ignored_template_name": binding.template_name,
+                    },
+                )
+                continue
+
+            seen_assignment_keys[assignment_key] = binding.template_name
             try:
                 # If running in dry run mode, skip the assignment creation
                 if dry_run:
@@ -632,7 +658,10 @@ def build_account_bindings(
     all_successes: list[dict[str, Any]] = []
     all_failures: list[dict[str, Any]] = []
 
-    for name, template in configuration.account_templates.items():
+    # Iterate deterministically to avoid non-deterministic provenance when multiple
+    # account templates result in the same effective assignment.
+    for name in sorted(configuration.account_templates.keys()):
+        template = configuration.account_templates[name]
         # Check if account matches this template's matcher
         if not template.matcher.matches(account):
             logger.debug(
@@ -673,7 +702,7 @@ def build_account_bindings(
         )
 
         # Create a permission for each of the template's groups
-        for template_ref in template.template_names:
+        for template_ref in sorted(template.template_names):
             permission = Permission(
                 name=template_ref,
                 groups=template.groups,
