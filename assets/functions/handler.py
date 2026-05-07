@@ -17,7 +17,15 @@ from libs.organizations import Organizations
 from libs.events import Publisher
 from libs.identity_center import IdentityCenter
 from libs.tracking import Tracking
-from libs.types import Assignment, Binding, Account, Configuration, Permission, Group
+from libs.types import (
+    Assignment,
+    Binding,
+    Account,
+    Configuration,
+    Permission,
+    Group,
+    User,
+)
 
 # Initialize the events publisher
 events_publisher: Publisher | None = None  # pylint: disable=invalid-name
@@ -58,19 +66,33 @@ def has_matching_binding(
         # Ensure the assignment is for the correct permission set
         if assignment.permission_set_name != binding.permission_set_name:
             continue
-        # Ensure the assignment is for a group that is in the binding
-        for group in binding.groups:
-            if assignment.principal_id == group.id:
-                logger.debug(
-                    "Found matching binding",
-                    extra={
-                        "action": "has_matching_binding",
-                        "assignment.account_id": assignment.account_id,
-                        "assignment.permission_set_name": assignment.permission_set_name,
-                        "assignment.group_name": assignment.group_name,
-                    },
-                )
-                return True
+        if assignment.principal_type == "GROUP":
+            for group in binding.groups:
+                if assignment.principal_id == group.id:
+                    logger.debug(
+                        "Found matching binding",
+                        extra={
+                            "action": "has_matching_binding",
+                            "assignment.account_id": assignment.account_id,
+                            "assignment.permission_set_name": assignment.permission_set_name,
+                            "assignment.group_name": assignment.group_name,
+                        },
+                    )
+                    return True
+
+        if assignment.principal_type == "USER":
+            for user in binding.users:
+                if assignment.principal_id == user.id:
+                    logger.debug(
+                        "Found matching binding",
+                        extra={
+                            "action": "has_matching_binding",
+                            "assignment.account_id": assignment.account_id,
+                            "assignment.permission_set_name": assignment.permission_set_name,
+                            "assignment.group_name": assignment.group_name,
+                        },
+                    )
+                    return True
 
     return False
 
@@ -116,10 +138,13 @@ def reconcile_creations(
     # Initialize the list to store the failures
     failures: list[dict[str, Any]] = []
 
-    # Assign the permission set to the groups
+    # Assign the permission set to the principals (groups + users)
     for binding in bindings:
-        # Iterate over the groups in the binding
-        for group in binding.groups:
+        principals: list[tuple[str, str, str]] = []
+        principals.extend([("GROUP", g.id, g.name) for g in binding.groups])
+        principals.extend([("USER", u.id, u.name) for u in binding.users])
+
+        for principal_type, principal_id, principal_name in principals:
             try:
                 # If running in dry run mode, skip the assignment creation
                 if dry_run:
@@ -128,10 +153,10 @@ def reconcile_creations(
                         extra={
                             "action": "assign_permissions",
                             "account_id": binding.account_id,
-                            "group_name": group.name,
+                            "group_name": principal_name,
                             "permission_set_name": binding.permission_set_name,
-                            "principal_id": group.id,
-                            "principal_type": "GROUP",
+                            "principal_id": principal_id,
+                            "principal_type": principal_type,
                             "template_name": binding.template_name,
                         },
                     )
@@ -142,18 +167,18 @@ def reconcile_creations(
                     account_id=binding.account_id,
                     permission_set_arn=binding.permission_set_arn,
                     permission_set_name=binding.permission_set_name,
-                    principal_id=group.id,
-                    principal_type="GROUP",
+                    principal_id=principal_id,
+                    principal_type=principal_type,
                 )
 
                 # Create the item in the tracking table
                 tracking.create(
                     account_id=binding.account_id,
-                    group_name=group.name,
+                    group_name=principal_name,
                     permission_set_arn=binding.permission_set_arn,
                     permission_set_name=binding.permission_set_name,
-                    principal_id=group.id,
-                    principal_type="GROUP",
+                    principal_id=principal_id,
+                    principal_type=principal_type,
                     template_name=binding.template_name,
                 )
                 events_publisher.publish(
@@ -161,14 +186,18 @@ def reconcile_creations(
                     detail={
                         "account_id": binding.account_id,
                         "assignment_id": tracking.get_assignment_id(
-                            binding.account_id, group.id, binding.permission_set_arn
+                            binding.account_id, principal_id, binding.permission_set_arn
                         ),
-                        "group": {"id": group.id, "name": group.name},
+                        **(
+                            {"group": {"id": principal_id, "name": principal_name}}
+                            if principal_type == "GROUP"
+                            else {"user": {"id": principal_id, "name": principal_name}}
+                        ),
                         "permission_set": {
                             "arn": binding.permission_set_arn,
                             "name": binding.permission_set_name,
                         },
-                        "principal_type": "GROUP",
+                        "principal_type": principal_type,
                         "template_name": binding.template_name,
                     },
                 )
@@ -176,7 +205,7 @@ def reconcile_creations(
                 successes.append(
                     {
                         "account_id": binding.account_id,
-                        "group_name": group.name,
+                        "group_name": principal_name,
                         "permission_set_arn": binding.permission_set_arn,
                         "permission_set_name": binding.permission_set_name,
                     }
@@ -185,7 +214,7 @@ def reconcile_creations(
                 failures.append(
                     {
                         "account_id": binding.account_id,
-                        "group_name": group.name,
+                        "group_name": principal_name,
                         "permission_set_arn": binding.permission_set_arn,
                         "permission_set_name": binding.permission_set_name,
                         "error": str(e),
@@ -388,7 +417,7 @@ def reconcile_deletions(
         raise
 
 
-def build_permission_bindings(
+def build_permissions(
     account: Account,
     configuration: Configuration,
     identity_center: IdentityCenter,
@@ -427,7 +456,7 @@ def build_permission_bindings(
     logger.debug(
         "Found permission template",
         extra={
-            "action": "build_bindings",
+            "action": "build_permissions",
             "account_id": account.id,
             "permission": permission.name,
             "template": template,
@@ -436,13 +465,14 @@ def build_permission_bindings(
 
     # Used to hold the groups that are available in the identity store
     available_groups: list[Group] = []
+    available_users: list[User] = []
 
     # Check all the groups exist in the identity store
     for group in permission.groups:
         logger.debug(
             "Checking if group exists in Identity Center",
             extra={
-                "action": "build_bindings",
+                "action": "build_permissions",
                 "account_id": account.id,
                 "group": group,
                 "permission": permission.name,
@@ -453,7 +483,7 @@ def build_permission_bindings(
             logger.warning(
                 "Group not found in Identity Center, skipping",
                 extra={
-                    "action": "build_bindings",
+                    "action": "build_permissions",
                     "account_id": account.id,
                     "group": group,
                     "permission": permission.name,
@@ -472,7 +502,7 @@ def build_permission_bindings(
         logger.debug(
             "Group found in Identity Center",
             extra={
-                "action": "build_permission_bindings",
+                "action": "build_permissions",
                 "account_id": account.id,
                 "permission": permission.name,
                 "group": group,
@@ -481,6 +511,42 @@ def build_permission_bindings(
 
         # Add the group to the list of available groups
         available_groups.append(identity_center.get_group(group))
+
+    # Resolve configured users (account_templates only). Tag-based permissions
+    # never populate permission.users.
+    for user_identifier in permission.users:
+        logger.debug(
+            "Checking if user exists in Identity Center",
+            extra={
+                "action": "build_permissions",
+                "account_id": account.id,
+                "user": user_identifier,
+                "permission": permission.name,
+            },
+        )
+
+        user = identity_center.get_user(user_identifier)
+        if not user:
+            logger.warning(
+                "User not found in Identity Center, skipping",
+                extra={
+                    "action": "build_permissions",
+                    "account_id": account.id,
+                    "user": user_identifier,
+                    "permission": permission.name,
+                },
+            )
+            failures.append(
+                {
+                    "account_id": account.id,
+                    "error": "User not found in identity store",
+                    "user": user_identifier,
+                    "permission": permission.name,
+                }
+            )
+            continue
+
+        available_users.append(user)
 
     # Check all the permission sets exist in the identity store
     for permission_set_name in template.permission_sets:
@@ -491,7 +557,7 @@ def build_permission_bindings(
             logger.warning(
                 "Permission set not found in identity store, skipping",
                 extra={
-                    "action": "build_permission_bindings",
+                    "action": "build_permissions",
                     "account_id": account.id,
                     "permission": permission_set_name,
                 },
@@ -509,6 +575,7 @@ def build_permission_bindings(
         binding: Binding = Binding(
             account_id=account.id,
             groups=available_groups,
+            users=available_users,
             permission_set_arn=permission_set.arn,
             permission_set_name=permission_set_name,
             template_name=permission.name,
@@ -516,9 +583,9 @@ def build_permission_bindings(
         bindings.append(binding)
 
     logger.debug(
-        "Built the following permission bindings",
+        "Built the following permissions",
         extra={
-            "action": "build_permission_bindings",
+            "action": "build_permissions",
             "account_id": account.id,
             "bindings": len(bindings),
             "template_name": permission.name,
@@ -534,9 +601,10 @@ def build_account_bindings(
     identity_center: IdentityCenter,
 ) -> Tuple[list[Binding], list[dict[str, Any]], list[dict[str, Any]]]:
     """
-    Evaluate which account templates match the given account and return Permission objects.
+    Evaluate which account templates match the given account and return bindings.
 
-    Uses AND logic: all specified conditions in a matcher must match for the account template to apply.
+    Uses AND logic: all specified conditions in a matcher must match for the
+    account template to apply.
 
     Args:
         account: The account to evaluate
@@ -604,6 +672,7 @@ def build_account_bindings(
             permission = Permission(
                 name=template_ref,
                 groups=template.groups,
+                users=template.users,
             )
             logger.debug(
                 "Building Permission object from account template",
@@ -617,7 +686,7 @@ def build_account_bindings(
                 },
             )
             # Build the permission bindings
-            bindings, successes, failures = build_permission_bindings(
+            bindings, successes, failures = build_permissions(
                 account=account,
                 configuration=configuration,
                 identity_center=identity_center,
@@ -625,7 +694,7 @@ def build_account_bindings(
             )
 
             logger.debug(
-                "Built the following permission bindings",
+                "Built the following permissions",
                 extra={
                     "action": "build_account_bindings",
                     "account.name": account.name,
@@ -696,7 +765,7 @@ def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         logger.setLevel(logging_level.upper())
         # Ensure we have a valid environment
         validate_environment()
-        # If the events topic ARN is set, initialize the events publisher
+        # Initialize the events publisher
         events_publisher = Publisher(
             topic_arn=os.environ.get("EVENTS_SNS_TOPIC_ARN", None),
             region_name=aws_region,
@@ -731,8 +800,6 @@ def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         )
         # Get the Organizations client
         organizations = Organizations()
-        # Get the tagging prefix (module doc default: ``sso``)
-        tag_prefix = os.environ.get("SSO_ACCOUNT_TAG_PREFIX") or "sso"
 
         logger.info(
             "Using the following environment variables",
@@ -778,41 +845,14 @@ def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         # Iterate over the target accounts and build a list of bindings based on
         # the accounts tags and account templates.
         for account in target_accounts:
-            # Does the account have permission tags?
-            permissions = account.get_permission_tags(tag_prefix)
-            # If the account has permission tags, add them to the list of bindings
-            if permissions or len(permissions) > 0:
-                # Get all the bindings from each permission tags
-                for permission in permissions:
-                    bindings, successes, failures = build_permission_bindings(
-                        account=account,
-                        configuration=configuration,
-                        identity_center=identity_center,
-                        permission=permission,
-                    )
-                    # Add the bindings to the list
-                    all_bindings.extend(bindings)
-                    # Add the successes to the list
-                    all_successes.extend(successes)
-                    # Add the failures to the list
-                    all_failures.extend(failures)
-            else:
-                logger.debug(
-                    "Skipping account as it has no permission tags",
-                    extra={
-                        "action": "lambda_handler",
-                        "account.name": account.name,
-                    },
-                )
-
-            # Does the account conform to any account templates?
-            bindings, successes, failures = build_account_bindings(
+            # Build a list of bindings for the account
+            account_bindings, successes, failures = build_account_bindings(
                 account=account,
                 configuration=configuration,
                 identity_center=identity_center,
             )
             # Add the bindings to the list
-            all_bindings.extend(bindings)
+            all_bindings.extend(account_bindings)
             # Add the successes to the list
             all_successes.extend(successes)
             # Add the failures to the list

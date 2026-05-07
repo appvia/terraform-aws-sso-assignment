@@ -1,8 +1,8 @@
 # Terraform AWS SSO Assignment
 
-This Terraform module deploys automation for **AWS IAM Identity Center (SSO)** account assignments. You define **permission-set templates** in **DynamoDB** (via [`modules/config`](./modules/config/)): template name → list of permission set names. On each **member account**, you set an Organizations tag whose key is **`{prefix}/{template_name}`** (Terraform default prefix is `Grant`) and whose **value** is a **comma-separated list of Identity Center group *display names***. The Lambda applies that template's permission sets to each listed group for that account only.
+This Terraform module deploys automation for **AWS IAM Identity Center (SSO)** account assignments. You define **permission-set templates** in **DynamoDB** (via [`modules/config`](./modules/config/)): template name → list of permission set names.
 
-**Account-level templates** allow you to auto-provision SSO assignments based on account **naming conventions**, **organizational units**, or **tags**—without requiring per-account tags. Combine this with tag-based assignment for flexible, scalable SSO management.
+**Account-level templates** allow you to auto-provision SSO assignments based on account **naming conventions**, **organizational units**, or **tags**. Account-level templates can bind **both groups and users** directly to accounts (useful for ad-hoc / one-off assignments).
 
 **EventBridge** runs the flow on a schedule and on new account creation; **Step Functions** adds retries and optional **SNS** failure notifications.
 
@@ -10,10 +10,10 @@ Use it when you want repeatable, infrastructure-as-code driven SSO assignments a
 
 ## Features
 
-- **Templates + account tags**: Define permission sets as **named templates** (e.g. `default`, `finance`). Member accounts get tags `<prefix>/<template>` (prefix configurable; Terraform default is `"Grant"`) listing which **IC groups** receive that template's permission sets on that account.
 - **Account-level templates** (NEW): Automatically apply templates to accounts matching **organizational unit paths**, **account name patterns**, or **account tags**. Uses logical AND matching: all conditions in a matcher must match for the template to apply.
+- **Account-level user bindings**: Account-level templates can also include a `users` list, which assigns the template's permission sets directly to **Identity Center users** (resolved via Identity Store APIs). This is intended for **ad-hoc** access; at scale, prefer groups.
 - **Declarative templates**: The [`modules/config`](./modules/config/) submodule writes templates and account matchers to DynamoDB.
-- **Additive sources**: Account tags and account-level templates are both evaluated; matching rules contribute bindings that are reconciled each run.
+- **Reconciliation**: Matching rules contribute bindings that are reconciled each run.
 - **Two trigger modes**: Scheduled reconciliation (default `rate(180 minutes)`) and organization account-creation events (CloudTrail on `CreateAccount`).
 - **Resilient orchestration**: Step Functions retries Lambda tasks (3 attempts, exponential backoff).
 - **Optional alerting**: If you set `sns_topic_arn`, failed runs can publish error details to your existing SNS topic.
@@ -23,25 +23,15 @@ Use it when you want repeatable, infrastructure-as-code driven SSO assignments a
 
 ## Architecture
 
-```
-EventBridge (account creation / schedule)
-           ↓
-       Step Functions (retries, optional SNS on failure)
-           ↓
-       Lambda (reads DynamoDB + account tags, calls SSO + Organizations)
-           ↓
-DynamoDB (templates + account matchers) + account tags (which IC groups get the template)
-           ↓
-       IAM Identity Center + Organizations
-```
+![Architectural Overview](docs/aws-sso-assignment-architecture.drawio.png)
 
 ### Components
 
-| Piece | Role |
-|-------|------|
-| Root module | DynamoDB table, Lambda (via [terraform-aws-modules/lambda/aws](https://github.com/terraform-aws-modules/terraform-aws-lambda)), Step Functions, EventBridge rules and IAM. |
-| `modules/config` | Populates DynamoDB: stores templates and account matchers. |
-| Lambda | Reads account details (OU path, name, tags), evaluates account matchers, loads `<prefix>/*` tags, and assigns permission sets to named IC groups (`assets/functions/handler.py`). |
+| Piece            | Role                                                                                                                                                                       |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Root module      | DynamoDB table, Lambda (via [terraform-aws-modules/lambda/aws](https://github.com/terraform-aws-modules/terraform-aws-lambda)), Step Functions, EventBridge rules and IAM. |
+| `modules/config` | Populates DynamoDB: stores templates and account matchers.                                                                                                                 |
+| Lambda           | Reads account details (OU path, name, tags), evaluates account matchers, and assigns permission sets to named IC groups (`assets/functions/handler.py`).                   |
 
 ## Usage
 
@@ -49,6 +39,7 @@ DynamoDB (templates + account matchers) + account tags (which IC groups get the 
 
 - Terraform **>= 1.0** and AWS provider **>= 6.0** (see `terraform.tf`).
 - IAM Identity Center enabled; permission sets and groups already exist (this module assigns groups to accounts—it does not create permission sets or IdP groups).
+- For `account_templates.users`, the referenced users must already exist in the Identity Store (Identity Center directory).
 - Credentials with rights to deploy Lambda, DynamoDB, Step Functions, EventBridge, IAM, and (for the handler) SSO Admin, Organizations, and Identity Store actions.
 - SSO instance ARN, for example:
 
@@ -86,8 +77,6 @@ module "sso_assignment" {
   source = "git::https://github.com/appvia/terraform-aws-sso-assignment.git"
 
   sso_instance_arn = local.sso_instance_arn
-  # The module default is "Grant". Set this if you want tags like `sso/default`.
-  sso_account_tag_prefix = "sso"
   tags = {
     Project = "sso-assignment"
   }
@@ -122,16 +111,18 @@ locals {
       prod_baseline = {
         description = "Auto-provision production accounts by OU"
         matcher = {
-          # Matches accounts whose OU path (leading segment stripped) matches the
-          # pattern. An account in OU "/production/accounts" becomes
-          # "production/accounts" before matching, so do NOT include a leading slash.
-          # This pattern matches e.g. "production/accounts/prod-workload-1".
-          organizational_units = ["production/accounts/*"]
+          # Matches accounts whose OU path matches the pattern.
+          # OU paths are normalized to include a leading "/" before matching, so
+          # patterns can (and should) include a leading "/".
+          # This pattern matches e.g. "/production/accounts/prod-workload-1".
+          organizational_units = ["/production/accounts/*"]
         }
         template_names = ["production"]
         groups         = ["ProdEngineers"]
+        # Optional: direct user principals (account templates only)
+        # users          = ["alice@example.com"]
       }
-      
+
       dev_baseline = {
         description = "Auto-provision development accounts"
         matcher = {
@@ -139,6 +130,7 @@ locals {
         }
         template_names = ["development"]
         groups         = ["DevEngineers"]
+        # users         = ["bob@example.com"]
       }
     }
   }
@@ -150,7 +142,6 @@ module "sso_assignment" {
   source = "git::https://github.com/appvia/terraform-aws-sso-assignment.git"
 
   sso_instance_arn = local.sso_instance_arn
-  sso_account_tag_prefix = "sso"
   tags = {
     Project = "sso-assignment"
   }
@@ -188,6 +179,7 @@ locals {
         }
         template_names = ["managed_baseline"]
         groups         = ["Operations"]
+        # users        = ["platform-oncall@example.com"]
       }
     }
   }
@@ -206,7 +198,6 @@ module "sso_assignment" {
 
   name             = "my-org-sso"
   sso_instance_arn = local.sso_instance_arn
-  sso_account_tag_prefix = "sso"
   step_function_schedule = "rate(30 minutes)"
 
   lambda_timeout  = 120
@@ -250,7 +241,6 @@ module "sso_assignment" {
   source = "git::https://github.com/appvia/terraform-aws-sso-assignment.git"
 
   sso_instance_arn = local.sso_instance_arn
-  sso_account_tag_prefix = "sso"
 
   # Optional: publish lifecycle events (topic must already exist)
   events_sns_topic_arn = aws_sns_topic.assignment_events.arn
@@ -279,15 +269,15 @@ configuration = {
       description     = "Description of this template"
     }
   }
-  
+
   account_templates = {
     matcher_name = {
       description = "Description of this account matcher"
       matcher = {
         # At least ONE of the following must be specified (others are optional)
         # All specified conditions must match (logical AND)
-        
-        organizational_units = ["prod/*"]             # OU trailing path patterns — no leading slash (see matcher details below)
+
+        organizational_units = ["/prod/*"]            # OU path glob patterns (leading "/" required; see matcher details below)
         name_patterns        = ["prod-*", ".*-prod"]  # Account name glob/regex patterns (ANY can match)
         account_tags         = {                                 # Account tags (all must match)
           Environment = "Production"
@@ -301,49 +291,24 @@ configuration = {
 }
 ```
 
-### How member-account tags work
-
-1. **DynamoDB / Terraform** — `configuration.templates` is a map of **template name → permission set names** (and description / optional `enabled`). The map key is stored as `group_name` (e.g. `default`, `finance`).
-
-2. **Member account (Organizations)** — set a tag on the **account** resource (12-digit account ID) with:
-   - **Key**: `<prefix>/<template_name>` where `<prefix>` is the module input `sso_account_tag_prefix` (default **`Grant`**).
-     - If you want tags like `sso/default`, set `sso_account_tag_prefix = "sso"` on the root module (recommended for clarity).
-   - **Value**: comma-separated **Identity Center group *display names*** (must match the Identity Store `DisplayName` exactly) that should receive **all** permission sets from that template on **this** account.
-
-   You can set multiple template tags on one account, e.g. `Grant/default` and `Grant/finance` with different group lists.
-
-**Example tags on an account** (vending / account factory / CLI):
-
-```bash
-aws organizations tag-resource \
-  --resource-id 123456789012 \
-  --tags \
-    Key=Grant/default,Value=App-Developers,App-ReadOnly-Users \
-    Key=Grant/finance,Value=Finance-Approvers
-```
-
-**Inspect tags the Lambda will read:**
-
-```bash
-aws organizations list-tags-for-resource --resource-id 123456789012
-```
-
-Accounts with **no** `<prefix>/*` tags and **no matching account templates** get **no** assignments from this mechanism (the run still succeeds for other accounts). Add or adjust tags / matchers, then let the next scheduled run (or a Step Functions execution) reconcile assignments.
-
 ### Account Template Matcher Details
 
 **Organizational Units** — Match by trailing OU path with glob patterns:
-- The Lambda fetches the account's full OU path from AWS Organizations (e.g. `/data/development`), splits it on `/`, and drops the first segment, yielding a leading-slash-free string (e.g. `data/development`).
-- Patterns are matched against this stripped path using Python [`fnmatch`](https://docs.python.org/3/library/fnmatch.html) (shell-style globs: `*` matches any characters, `?` matches one character).
-- **Do not include a leading `/` in your patterns.** A pattern of `/data/*` will never match — use `data/*` instead.
-- An account in OU `/data/development` is matched by `data/*`, `data/development`, or `data/d*`.
+
+- The Lambda fetches the account's OU path from AWS Organizations (commonly like `/data/development`, but may also include a root id segment like `r-abc/...` depending on source).
+- Before matching, the OU path is normalized to a consistent form with a single leading `/` (e.g. `r-abc/ou-prod/ou-workloads` becomes `/ou-prod/ou-workloads`).
+- Patterns are matched against this normalized path using Python [`fnmatch`](https://docs.python.org/3/library/fnmatch.html) (shell-style globs: `*` matches any characters, `?` matches one character).
+- **Include the leading `/` in your patterns** (e.g. `"/data/*"`). Patterns without a leading `/` are not supported.
+- An account in OU `/data/development` is matched by `/data/*`, `/data/development`, or `/data/d*`.
 - At least one pattern must match for the condition to pass.
 
 **Account Name** — Match by account name with glob pattern:
+
 - Single pattern string (e.g. `prod-*`)
 - Uses fnmatch glob syntax
 
 **Account Tags** — Match by account tags with AND logic:
+
 - All specified tags must exist on the account
 - All values must match exactly (case-sensitive)
 - If no tags specified, this condition is skipped
@@ -374,8 +339,6 @@ module "config" {
 ### Configuration notes
 
 - **`configuration`** (on `modules/config`): Contains `templates` (top-level keys are template names) and optional `account_templates` (name → matcher + template references). See [modules/config/README.md](./modules/config/README.md).
-- **`sso_account_tag_prefix`** (root module, Terraform default `"Grant"`): tag keys on accounts are `<prefix>/<template_name>`.
-- **Backwards compatibility**: Older configurations using only tag-based assignment continue to work—just use `account_templates = {}` (or omit it, defaults to empty).
 
 ## Module layout
 
@@ -424,7 +387,6 @@ module "sso_assignment" {
   # provider = aws  # default provider
 
   sso_instance_arn        = var.sso_instance_arn
-  sso_account_tag_prefix  = "sso"
   step_function_schedule  = "rate(180 minutes)"
   # ... other inputs ...
 }
@@ -444,7 +406,7 @@ resource "aws_cloudwatch_event_rule" "sso_assignment_account_creation_use1" {
       eventSource = ["organizations.amazonaws.com"]
     }
   })
-  
+
   provider       = aws.use1
 }
 
@@ -515,7 +477,7 @@ The module defines IAM for Lambda (DynamoDB read, SSO/Identity Store/Organizatio
 ### Account template not matching
 
 - Check account OU path: Use `aws organizations list-parents --child-id <account-id>` and build the full path
-- **OU pattern format**: The Lambda strips the leading `/` (and any root identifier) from the OU path before matching. An account in OU `/data/development` is matched as `data/development`. Your pattern must **not** include a leading slash — use `data/*`, not `/data/*`.
+- **OU pattern format**: OU matching uses `fnmatch` against a normalized OU path with a leading `/` (e.g. `/data/development`). Patterns must include a leading `/`, e.g. `"/data/*"`.
 - Check account name: Use `aws organizations describe-account --account-id <account-id>`
 - Check account tags: Use `aws organizations list-tags-for-resource --resource-id <account-id>`
 - Enable DEBUG logging: Check Lambda CloudWatch logs for detailed matcher debug output
@@ -544,51 +506,52 @@ Contributions are welcome via issues and pull requests.
 See [LICENSE](./LICENSE).
 
 <!-- BEGIN_TF_DOCS -->
+
 ## Providers
 
-| Name | Version |
-|------|---------|
-| <a name="provider_aws"></a> [aws](#provider\_aws) | >= 6.0.0 |
+| Name                                             | Version  |
+| ------------------------------------------------ | -------- |
+| <a name="provider_aws"></a> [aws](#provider_aws) | >= 6.0.0 |
 
 ## Inputs
 
-| Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
-| <a name="input_sso_instance_arn"></a> [sso\_instance\_arn](#input\_sso\_instance\_arn) | ARN of the AWS SSO instance | `string` | n/a | yes |
-| <a name="input_cloudwatch_logs_kms_key_id"></a> [cloudwatch\_logs\_kms\_key\_id](#input\_cloudwatch\_logs\_kms\_key\_id) | KMS key ID for CloudWatch logs | `string` | `null` | no |
-| <a name="input_cloudwatch_logs_log_group_class"></a> [cloudwatch\_logs\_log\_group\_class](#input\_cloudwatch\_logs\_log\_group\_class) | The class of the CloudWatch log group | `string` | `"STANDARD"` | no |
-| <a name="input_cloudwatch_logs_retention_in_days"></a> [cloudwatch\_logs\_retention\_in\_days](#input\_cloudwatch\_logs\_retention\_in\_days) | The number of days to retain the CloudWatch logs | `number` | `30` | no |
-| <a name="input_dynamodb_billing_mode"></a> [dynamodb\_billing\_mode](#input\_dynamodb\_billing\_mode) | DynamoDB billing mode (PAY\_PER\_REQUEST or PROVISIONED) | `string` | `"PAY_PER_REQUEST"` | no |
-| <a name="input_dynamodb_encryption_enabled"></a> [dynamodb\_encryption\_enabled](#input\_dynamodb\_encryption\_enabled) | Enable server-side encryption for DynamoDB tables (will use AWS managed KMS key by default) | `bool` | `false` | no |
-| <a name="input_dynamodb_kms_key"></a> [dynamodb\_kms\_key](#input\_dynamodb\_kms\_key) | Optional KMS key ID for DynamoDB encryption | `string` | `null` | no |
-| <a name="input_dynamodb_point_in_time_recovery_enabled"></a> [dynamodb\_point\_in\_time\_recovery\_enabled](#input\_dynamodb\_point\_in\_time\_recovery\_enabled) | Enable point-in-time recovery for DynamoDB tables (for both tables) | `bool` | `false` | no |
-| <a name="input_dynamodb_point_in_time_recovery_retention_period"></a> [dynamodb\_point\_in\_time\_recovery\_retention\_period](#input\_dynamodb\_point\_in\_time\_recovery\_retention\_period) | The number of days to retain the DynamoDB point-in-time recovery | `number` | `7` | no |
-| <a name="input_enable_account_triggers"></a> [enable\_account\_triggers](#input\_enable\_account\_triggers) | Enable EventBridge rules to trigger Lambda when AWS Organizations account creation events are detected (Only available in the us-east-1 region) | `bool` | `false` | no |
-| <a name="input_enable_config_triggers"></a> [enable\_config\_triggers](#input\_enable\_config\_triggers) | Enable EventBridge Pipes to trigger Lambda when config table is updated | `bool` | `true` | no |
-| <a name="input_enable_dry_run"></a> [enable\_dry\_run](#input\_enable\_dry\_run) | When true, triggers run the Lambda in dry-run (noop) mode | `bool` | `false` | no |
-| <a name="input_events_sns_topic_arn"></a> [events\_sns\_topic\_arn](#input\_events\_sns\_topic\_arn) | Optional ARN of an existing SNS topic to publish assignment creation/deletion events from the Lambda (if null, event publishing disabled). This topic is NOT created by this module. | `string` | `null` | no |
-| <a name="input_lambda_memory"></a> [lambda\_memory](#input\_lambda\_memory) | Lambda function memory allocation in MB | `number` | `512` | no |
-| <a name="input_lambda_runtime"></a> [lambda\_runtime](#input\_lambda\_runtime) | Lambda function runtime | `string` | `"python3.14"` | no |
-| <a name="input_lambda_timeout"></a> [lambda\_timeout](#input\_lambda\_timeout) | Lambda function timeout in seconds | `number` | `300` | no |
-| <a name="input_name"></a> [name](#input\_name) | Name for all resources i.e. handler, lambda, step function, event bridge, etc. | `string` | `"lz-sso"` | no |
-| <a name="input_sns_topic_arn"></a> [sns\_topic\_arn](#input\_sns\_topic\_arn) | ARN of SNS topic for Step Function notifications (if null, notifications disabled) | `string` | `null` | no |
-| <a name="input_sso_account_tag_prefix"></a> [sso\_account\_tag\_prefix](#input\_sso\_account\_tag\_prefix) | Account tag key prefix for permission-set templates. Keys are {prefix}/{template\_name} (e.g. sso/default) — see module README | `string` | `"Grant"` | no |
-| <a name="input_step_function_schedule"></a> [step\_function\_schedule](#input\_step\_function\_schedule) | EventBridge cron/rate schedule for Lambda execution | `string` | `"rate(180 minutes)"` | no |
-| <a name="input_tags"></a> [tags](#input\_tags) | Common tags to apply to all resources | `map(string)` | `{}` | no |
+| Name                                                                                                                                                                              | Description                                                                                                                                                                          | Type          | Default               | Required |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------- | --------------------- | :------: |
+| <a name="input_sso_instance_arn"></a> [sso_instance_arn](#input_sso_instance_arn)                                                                                                 | ARN of the AWS SSO instance                                                                                                                                                          | `string`      | n/a                   |   yes    |
+| <a name="input_cloudwatch_logs_kms_key_id"></a> [cloudwatch_logs_kms_key_id](#input_cloudwatch_logs_kms_key_id)                                                                   | KMS key ID for CloudWatch logs                                                                                                                                                       | `string`      | `null`                |    no    |
+| <a name="input_cloudwatch_logs_log_group_class"></a> [cloudwatch_logs_log_group_class](#input_cloudwatch_logs_log_group_class)                                                    | The class of the CloudWatch log group                                                                                                                                                | `string`      | `"STANDARD"`          |    no    |
+| <a name="input_cloudwatch_logs_retention_in_days"></a> [cloudwatch_logs_retention_in_days](#input_cloudwatch_logs_retention_in_days)                                              | The number of days to retain the CloudWatch logs                                                                                                                                     | `number`      | `30`                  |    no    |
+| <a name="input_dynamodb_billing_mode"></a> [dynamodb_billing_mode](#input_dynamodb_billing_mode)                                                                                  | DynamoDB billing mode (PAY_PER_REQUEST or PROVISIONED)                                                                                                                               | `string`      | `"PAY_PER_REQUEST"`   |    no    |
+| <a name="input_dynamodb_encryption_enabled"></a> [dynamodb_encryption_enabled](#input_dynamodb_encryption_enabled)                                                                | Enable server-side encryption for DynamoDB tables (will use AWS managed KMS key by default)                                                                                          | `bool`        | `false`               |    no    |
+| <a name="input_dynamodb_kms_key"></a> [dynamodb_kms_key](#input_dynamodb_kms_key)                                                                                                 | Optional KMS key ID for DynamoDB encryption                                                                                                                                          | `string`      | `null`                |    no    |
+| <a name="input_dynamodb_point_in_time_recovery_enabled"></a> [dynamodb_point_in_time_recovery_enabled](#input_dynamodb_point_in_time_recovery_enabled)                            | Enable point-in-time recovery for DynamoDB tables (for both tables)                                                                                                                  | `bool`        | `false`               |    no    |
+| <a name="input_dynamodb_point_in_time_recovery_retention_period"></a> [dynamodb_point_in_time_recovery_retention_period](#input_dynamodb_point_in_time_recovery_retention_period) | The number of days to retain the DynamoDB point-in-time recovery                                                                                                                     | `number`      | `7`                   |    no    |
+| <a name="input_enable_account_triggers"></a> [enable_account_triggers](#input_enable_account_triggers)                                                                            | Enable EventBridge rules to trigger Lambda when AWS Organizations account creation events are detected (Only available in the us-east-1 region)                                      | `bool`        | `false`               |    no    |
+| <a name="input_enable_config_triggers"></a> [enable_config_triggers](#input_enable_config_triggers)                                                                               | Enable EventBridge Pipes to trigger Lambda when config table is updated                                                                                                              | `bool`        | `true`                |    no    |
+| <a name="input_enable_dry_run"></a> [enable_dry_run](#input_enable_dry_run)                                                                                                       | When true, triggers run the Lambda in dry-run (noop) mode                                                                                                                            | `bool`        | `false`               |    no    |
+| <a name="input_events_sns_topic_arn"></a> [events_sns_topic_arn](#input_events_sns_topic_arn)                                                                                     | Optional ARN of an existing SNS topic to publish assignment creation/deletion events from the Lambda (if null, event publishing disabled). This topic is NOT created by this module. | `string`      | `null`                |    no    |
+| <a name="input_lambda_memory"></a> [lambda_memory](#input_lambda_memory)                                                                                                          | Lambda function memory allocation in MB                                                                                                                                              | `number`      | `512`                 |    no    |
+| <a name="input_lambda_runtime"></a> [lambda_runtime](#input_lambda_runtime)                                                                                                       | Lambda function runtime                                                                                                                                                              | `string`      | `"python3.14"`        |    no    |
+| <a name="input_lambda_timeout"></a> [lambda_timeout](#input_lambda_timeout)                                                                                                       | Lambda function timeout in seconds                                                                                                                                                   | `number`      | `300`                 |    no    |
+| <a name="input_name"></a> [name](#input_name)                                                                                                                                     | Name for all resources i.e. handler, lambda, step function, event bridge, etc.                                                                                                       | `string`      | `"lz-sso"`            |    no    |
+| <a name="input_sns_topic_arn"></a> [sns_topic_arn](#input_sns_topic_arn)                                                                                                          | ARN of SNS topic for Step Function notifications (if null, notifications disabled)                                                                                                   | `string`      | `null`                |    no    |
+| <a name="input_step_function_schedule"></a> [step_function_schedule](#input_step_function_schedule)                                                                               | EventBridge cron/rate schedule for Lambda execution                                                                                                                                  | `string`      | `"rate(180 minutes)"` |    no    |
+| <a name="input_tags"></a> [tags](#input_tags)                                                                                                                                     | Common tags to apply to all resources                                                                                                                                                | `map(string)` | `{}`                  |    no    |
 
 ## Outputs
 
-| Name | Description |
-|------|-------------|
-| <a name="output_config_dynamodb_table_arn"></a> [config\_dynamodb\_table\_arn](#output\_config\_dynamodb\_table\_arn) | ARN of the DynamoDB table storing group configurations |
-| <a name="output_config_dynamodb_table_name"></a> [config\_dynamodb\_table\_name](#output\_config\_dynamodb\_table\_name) | Name of the DynamoDB table storing group configurations |
-| <a name="output_eventbridge_invoke_role_arn"></a> [eventbridge\_invoke\_role\_arn](#output\_eventbridge\_invoke\_role\_arn) | ARN of EventBridge roles for account creation and cron schedule |
-| <a name="output_eventbridge_rule_arns"></a> [eventbridge\_rule\_arns](#output\_eventbridge\_rule\_arns) | ARNs of EventBridge rules for account creation and cron schedule |
-| <a name="output_eventbridge_rule_names"></a> [eventbridge\_rule\_names](#output\_eventbridge\_rule\_names) | Names of EventBridge rules for account creation and cron schedule |
-| <a name="output_lambda_function_arn"></a> [lambda\_function\_arn](#output\_lambda\_function\_arn) | ARN of the Lambda function for SSO group assignment |
-| <a name="output_lambda_function_name"></a> [lambda\_function\_name](#output\_lambda\_function\_name) | Name of the Lambda function for SSO group assignment |
-| <a name="output_lambda_policy_json"></a> [lambda\_policy\_json](#output\_lambda\_policy\_json) | IAM policy document (JSON) attached to the Lambda role via policy\_json |
-| <a name="output_step_function_arn"></a> [step\_function\_arn](#output\_step\_function\_arn) | ARN of the Step Function state machine orchestrating SSO assignments |
-| <a name="output_tracking_dynamodb_table_arn"></a> [tracking\_dynamodb\_table\_arn](#output\_tracking\_dynamodb\_table\_arn) | ARN of the DynamoDB table tracking managed SSO assignments |
-| <a name="output_tracking_dynamodb_table_name"></a> [tracking\_dynamodb\_table\_name](#output\_tracking\_dynamodb\_table\_name) | Name of the DynamoDB table tracking managed SSO assignments |
+| Name                                                                                                                    | Description                                                            |
+| ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| <a name="output_config_dynamodb_table_arn"></a> [config_dynamodb_table_arn](#output_config_dynamodb_table_arn)          | ARN of the DynamoDB table storing group configurations                 |
+| <a name="output_config_dynamodb_table_name"></a> [config_dynamodb_table_name](#output_config_dynamodb_table_name)       | Name of the DynamoDB table storing group configurations                |
+| <a name="output_eventbridge_invoke_role_arn"></a> [eventbridge_invoke_role_arn](#output_eventbridge_invoke_role_arn)    | ARN of EventBridge roles for account creation and cron schedule        |
+| <a name="output_eventbridge_rule_arns"></a> [eventbridge_rule_arns](#output_eventbridge_rule_arns)                      | ARNs of EventBridge rules for account creation and cron schedule       |
+| <a name="output_eventbridge_rule_names"></a> [eventbridge_rule_names](#output_eventbridge_rule_names)                   | Names of EventBridge rules for account creation and cron schedule      |
+| <a name="output_lambda_function_arn"></a> [lambda_function_arn](#output_lambda_function_arn)                            | ARN of the Lambda function for SSO group assignment                    |
+| <a name="output_lambda_function_name"></a> [lambda_function_name](#output_lambda_function_name)                         | Name of the Lambda function for SSO group assignment                   |
+| <a name="output_lambda_policy_json"></a> [lambda_policy_json](#output_lambda_policy_json)                               | IAM policy document (JSON) attached to the Lambda role via policy_json |
+| <a name="output_step_function_arn"></a> [step_function_arn](#output_step_function_arn)                                  | ARN of the Step Function state machine orchestrating SSO assignments   |
+| <a name="output_tracking_dynamodb_table_arn"></a> [tracking_dynamodb_table_arn](#output_tracking_dynamodb_table_arn)    | ARN of the DynamoDB table tracking managed SSO assignments             |
+| <a name="output_tracking_dynamodb_table_name"></a> [tracking_dynamodb_table_name](#output_tracking_dynamodb_table_name) | Name of the DynamoDB table tracking managed SSO assignments            |
+
 <!-- END_TF_DOCS -->

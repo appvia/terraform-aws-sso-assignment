@@ -7,7 +7,7 @@ import pytest
 
 from libs.errors import HandlerError
 from libs.identity_center import IdentityCenter
-from libs.types import Group, PermissionSet
+from libs.types import Group, PermissionSet, User
 
 
 class TestIdentityCenter:
@@ -67,6 +67,26 @@ class TestIdentityCenter:
         assert ic.has_group("Missing") is False
         assert ic.get_group("TeamA").id == "g-1"
         assert ic.get_group("Missing") is None
+
+    def test_get_user_uses_cache_and_get_user_id(self):
+        ic = IdentityCenter.__new__(IdentityCenter)
+        ic.instance_arn = "arn:i"
+        ic.client = MagicMock()
+        ic.identitystore_client = MagicMock()
+        ic.permission_sets = []
+        ic.groups = []
+        ic.identity_store_id = "d-123"
+        ic.users_by_identifier = {}
+
+        ic.identitystore_client.get_user_id.return_value = {"UserId": "u-1"}
+
+        user = ic.get_user("alice@example.com")
+        assert user == User(name="alice@example.com", id="u-1")
+
+        # Second call uses cache (no additional get_user_id call)
+        user2 = ic.get_user("alice@example.com")
+        assert user2 == user
+        assert ic.identitystore_client.get_user_id.call_count == 1
 
     def test_list_groups_populates_cache_and_is_used_by_has_group_and_get_group(self):
         ic = IdentityCenter.__new__(IdentityCenter)

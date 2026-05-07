@@ -146,17 +146,6 @@ variable "events_sns_topic_arn" {
   default     = null
 }
 
-variable "sso_account_tag_prefix" {
-  description = "Account tag key prefix for permission-set templates. Keys are {prefix}/{template_name} (e.g. sso/default) — see module README"
-  type        = string
-  default     = "Grant"
-
-  validation {
-    condition     = length(var.sso_account_tag_prefix) > 0 && !strcontains(var.sso_account_tag_prefix, "/")
-    error_message = "sso_account_tag_prefix must be non-empty and must not contain '/'."
-  }
-}
-
 variable "sso_instance_arn" {
   description = "ARN of the AWS SSO instance"
   type        = string

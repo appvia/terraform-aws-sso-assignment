@@ -108,8 +108,6 @@ module "lambda" {
     DYNAMODB_CONFIG_TABLE = aws_dynamodb_table.config.name
     # Name of the DynamoDB table tracking managed SSO assignments
     DYNAMODB_TRACKING_TABLE = aws_dynamodb_table.assignments_tracking.name
-    # Tag prefix for permission-set templates used for account tagging
-    SSO_ACCOUNT_TAG_PREFIX = var.sso_account_tag_prefix
     # ARN of the Identity Center instance
     SSO_INSTANCE_ARN = var.sso_instance_arn
   }
