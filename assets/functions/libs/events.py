@@ -51,6 +51,7 @@ class Publisher:
     def publish(self, 
         event_type: str,
         detail: dict[str, Any],
+        dry_run: bool = False,
     ) -> None:
         """
         Publish an assignment lifecycle event to the SNS topic.
@@ -58,6 +59,7 @@ class Publisher:
         Args:
             event_type: The type of event to publish
             detail: The detail of the event to publish
+            dry_run: Whether to publish the event to the SNS topic
 
         Returns:
             None
@@ -65,6 +67,17 @@ class Publisher:
 
         # Check if the topic ARN is set
         if not self.topic_arn:
+            return
+
+        if dry_run:
+            logger.info(
+                "Dry run mode, skipping event publication",
+                extra={
+                    "action": "publish",
+                    "event_type": event_type,
+                    "detail": detail,
+                },
+            )
             return
 
         # Create an event object
