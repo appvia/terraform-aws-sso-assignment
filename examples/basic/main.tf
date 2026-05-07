@@ -79,6 +79,18 @@ locals {
         }
       }
 
+      "user-provisioning" = {
+        description    = "Used to provision one-off accounts"
+        template_names = ["platform"]
+        users          = ["alice@example.com"]
+
+        matcher = {
+          account_tags = {
+            Environment = "Development"
+          }
+        }
+      }
+
       "data-platform" = {
         description    = "Used to provision data engineering roles"
         template_names = ["data"]
