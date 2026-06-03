@@ -996,7 +996,9 @@ class TestBindingsFromAccountTemplates:
             groups={"G1": "g-1", "G2": "g-2"},
             permission_sets={"PS1": "arn:ps1", "PS2": "arn:ps2"},
         )
-        acct = Account(id="111111111111", name="any", tags={}, organizational_unit_path="/")
+        acct = Account(
+            id="111111111111", name="any", tags={}, organizational_unit_path="/"
+        )
 
         bindings, successes, failures = handler.build_account_bindings(
             account=acct, configuration=cfg, identity_center=ic
