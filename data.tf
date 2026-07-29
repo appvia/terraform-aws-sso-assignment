@@ -27,6 +27,17 @@ data "aws_iam_policy_document" "lambda_policy" {
   }
 
   statement {
+    sid    = "AllowIAM"
+    effect = "Allow"
+    actions = [
+      "iam:CreateRole",
+      "iam:DeleteRole",
+      "iam:Describe*",
+      "iam:List*",
+    ]
+  }
+
+  statement {
     sid    = "AllowIdentityStore"
     effect = "Allow"
     actions = [
