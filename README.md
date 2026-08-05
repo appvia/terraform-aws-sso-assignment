@@ -18,7 +18,8 @@ Use it when you want repeatable, infrastructure-as-code driven SSO assignments a
 - **Resilient orchestration**: Step Functions retries Lambda tasks (3 attempts, exponential backoff).
 - **Optional alerting**: If you set `sns_topic_arn`, failed runs can publish error details to your existing SNS topic.
 - **Optional event stream**: If you set `events_sns_topic_arn`, the Lambda publishes assignment lifecycle events (created/deleted) to your existing SNS topic.
-- **Flexible operations**: Tune Lambda memory, timeout, runtime, CloudWatch log retention, and DynamoDB billing mode.
+- **Optional observability**: Set `enable_observability` to provision CloudWatch alarms across the Lambda, Step Function, triggers and DynamoDB tables, including a liveness alarm that fires when reconciliation silently stops. See [Observability](#observability).
+- **Flexible operations**: Tune Lambda memory, timeout, runtime, log level, CloudWatch log retention, and DynamoDB billing mode.
 - **Packaged handler**: Python Lambda source lives under [`assets/functions/`](./assets/functions/) (JSON logging, unit tests alongside the handler).
 
 ## Architecture
@@ -345,10 +346,14 @@ module "config" {
 
 ```
 terraform-aws-sso-assignment/
-├── main.tf, variables.tf, outputs.tf, locals.tf, data.tf, terraform.tf
-├── dynamodb.tf, lambda.tf, step_function.tf, eventbridge.tf
-├── assets/functions/          # Lambda (handler.py, tests)
+├── main.tf                    # DynamoDB, Lambda, EventBridge rules and Pipe
+├── step_function.tf           # State machine definition, role and policy
+├── observability.tf           # CloudWatch alarms and log metric filters
+├── data.tf                    # IAM policy documents
+├── variables.tf, outputs.tf, locals.tf, terraform.tf
+├── assets/functions/          # Lambda (handler.py, libs/, tests)
 ├── modules/config/            # DynamoDB item population
+├── tests/                     # Terraform native tests
 └── examples/basic/            # End-to-end sample
 ```
 
@@ -467,6 +472,108 @@ aws stepfunctions describe-state-machine --state-machine-arn "$SF"
 
 The module defines IAM for Lambda (DynamoDB read, SSO/Identity Store/Organizations APIs including `ListTagsForResource` on member accounts, logs, and optional `sns:Publish` when `events_sns_topic_arn` is set), Step Functions (invoke Lambda, optional SNS publish via `sns_topic_arn`), and EventBridge (start execution). Exact policies are in `data.tf` and `step_function.tf`.
 
+## Observability
+
+This module is a control plane for account access: when it stops working, access drifts and
+nobody finds out until someone cannot log in. Setting `enable_observability = true` provisions
+CloudWatch alarms across every component in the chain. It is off by default, so existing
+deployments are unaffected until you opt in.
+
+```hcl
+module "sso_assignment" {
+  source = "github.com/appvia/terraform-aws-sso-assignment?ref=v1.0.0"
+
+  sso_instance_arn = "arn:aws:sso:::instance/ssoins-1234567890abcdef"
+
+  # Provision the alarms and log metric filters
+  enable_observability = true
+
+  # Existing topics notified on alarm and on recovery. The module does not create these.
+  # Leave empty to create the alarms without notifications.
+  alarm_sns_topic_arns = ["arn:aws:sns:eu-west-2:123456789012:platform-alarms"]
+}
+```
+
+### What is alarmed
+
+| Alarm | Source | Fires when |
+| ----- | ------ | ---------- |
+| `<name>-handler-errors` | Log metric filter | The handler logs an `ERROR` level line |
+| `<name>-identity-resolution-failures` | Log metric filter | A group, user or permission set named in configuration cannot be resolved in Identity Center |
+| `<name>-step-function-executions-failed` | `AWS/States` | A reconciliation run finished with errors |
+| `<name>-step-function-executions-timed-out` | `AWS/States` | A run exceeded the state machine timeout |
+| `<name>-step-function-no-executions` | `AWS/States` | **No run has started at all** within `alarm_execution_staleness_period_seconds` |
+| `<name>-lambda-errors` | `AWS/Lambda` | An invocation was killed by timeout, out of memory, or an init failure |
+| `<name>-lambda-throttles` | `AWS/Lambda` | An invocation was rejected by concurrency limits |
+| `<name>-lambda-duration` | `AWS/Lambda` | Runtime exceeded `alarm_duration_threshold_percent` of `lambda_timeout` |
+| `<name>-eventbridge-<rule>-failed-invocations` | `AWS/Events` | A rule could not start the Step Function. One alarm per enabled rule |
+| `<name>-pipes-execution-failed` | `AWS/Pipes` | The config table Pipe could not start the Step Function. Only when `enable_config_triggers` is true |
+| `<name>-dynamodb-<table>-throttled-requests` | `AWS/DynamoDB` | Either table throttled requests, leaving reconciliation with an incomplete view |
+
+Between eleven and thirteen alarms depending on which triggers are enabled, plus two custom
+metrics. At the top end that is roughly **$1.90/month** ($0.10 per alarm, $0.30 per metric).
+
+### Why the log metric filters matter
+
+The Lambda handler catches every exception and *returns* a result document rather than raising,
+because the Step Function's `EvaluateResponse` state inspects the returned `errors` field to
+decide success or failure. A consequence is that the `AWS/Lambda` `Errors` metric stays at zero
+for application-level failures — it only moves for timeouts, out of memory kills and init
+failures.
+
+The two `aws_cloudwatch_log_metric_filter` resources recover that signal from the structured
+JSON logs the handler already emits, without changing its contract:
+
+- `{ $.level = "ERROR" }` → `HandlerErrors`
+- `{ $.level = "WARNING" && $.action = "build_permissions" }` → `IdentityResolutionFailures`
+
+The second is worth calling out. When an account tag names a group that no longer exists in
+Identity Center, the handler logs a warning, records a failure and carries on. The run still
+reports a status — but the intended access was never granted. That alarm is how you find out.
+Set `alarm_identity_resolution_threshold` above `0` if your estate has known-stale references
+you have chosen to live with.
+
+Metrics are published to `alarm_metric_namespace`, `Appvia/SSOAssignment` by default.
+
+### The liveness alarm
+
+`<name>-step-function-no-executions` is the one alarm that catches a *silent* failure: a
+disabled EventBridge rule, a broken invoke role, or a dead Pipe. Every other alarm needs
+something to go wrong loudly; this one fires on the **absence** of runs, using
+`treat_missing_data = "breaching"`.
+
+Its evaluation period is `alarm_execution_staleness_period_seconds`, default `21600` (6 hours,
+twice the default schedule). `step_function_schedule` is a free-form expression that cannot be
+parsed reliably in Terraform, so **if you shorten the schedule you must set this yourself** —
+keep it comfortably above the schedule interval to avoid false positives, and below the point
+at which you would want to know reconciliation had stopped.
+
+### Log level
+
+`log_level` sets the `LOG_LEVEL` environment variable on the Lambda (default `INFO`). Individual
+invocations can still override it by passing `logging_level` in the event, which is useful for
+one-off debugging without redeploying:
+
+```bash
+SF=$(terraform output -raw step_function_arn)
+aws stepfunctions start-execution --state-machine-arn "$SF" \
+  --input '{"source":"cron_schedule","logging_level":"DEBUG"}'
+```
+
+### Inspecting the logs directly
+
+```bash
+LG=$(terraform output -raw lambda_cloudwatch_log_group_name)
+
+# Errors in the last hour
+aws logs filter-log-events --log-group-name "$LG" --start-time $(( ($(date +%s) - 3600) * 1000 )) \
+  --filter-pattern '{ $.level = "ERROR" }'
+
+# Identities that could not be resolved
+aws logs filter-log-events --log-group-name "$LG" --start-time $(( ($(date +%s) - 3600) * 1000 )) \
+  --filter-pattern '{ $.level = "WARNING" && $.action = "build_permissions" }'
+```
+
 ## Troubleshooting
 
 ### No assignments created
@@ -481,7 +588,7 @@ The module defines IAM for Lambda (DynamoDB read, SSO/Identity Store/Organizatio
 - **OU pattern format**: OU matching uses `fnmatch` against a normalized OU path with a leading `/` (e.g. `/data/development`). Patterns must include a leading `/`, e.g. `"/data/*"`.
 - Check account name: Use `aws organizations describe-account --account-id <account-id>`
 - Check account tags: Use `aws organizations list-tags-for-resource --resource-id <account-id>`
-- Enable DEBUG logging: Check Lambda CloudWatch logs for detailed matcher debug output
+- Enable DEBUG logging: set `log_level = "DEBUG"`, or pass `"logging_level": "DEBUG"` in the Step Function input for a one-off run, then check the Lambda CloudWatch logs for detailed matcher debug output
 
 ### No assignments for an account
 
@@ -518,6 +625,11 @@ See [LICENSE](./LICENSE).
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
 | <a name="input_sso_instance_arn"></a> [sso\_instance\_arn](#input\_sso\_instance\_arn) | ARN of the AWS SSO instance | `string` | n/a | yes |
+| <a name="input_alarm_duration_threshold_percent"></a> [alarm\_duration\_threshold\_percent](#input\_alarm\_duration\_threshold\_percent) | Percentage of lambda\_timeout at which the Lambda duration alarm triggers | `number` | `80` | no |
+| <a name="input_alarm_execution_staleness_period_seconds"></a> [alarm\_execution\_staleness\_period\_seconds](#input\_alarm\_execution\_staleness\_period\_seconds) | Period in seconds over which an absence of Step Function executions raises the liveness alarm. Must be comfortably longer than step\_function\_schedule | `number` | `21600` | no |
+| <a name="input_alarm_identity_resolution_threshold"></a> [alarm\_identity\_resolution\_threshold](#input\_alarm\_identity\_resolution\_threshold) | Number of identity resolution warnings (groups, users or permission sets missing from Identity Center) tolerated before alarming | `number` | `0` | no |
+| <a name="input_alarm_metric_namespace"></a> [alarm\_metric\_namespace](#input\_alarm\_metric\_namespace) | CloudWatch namespace for the custom metrics extracted from the Lambda logs | `string` | `"Appvia/SSOAssignment"` | no |
+| <a name="input_alarm_sns_topic_arns"></a> [alarm\_sns\_topic\_arns](#input\_alarm\_sns\_topic\_arns) | ARNs of existing SNS topics to notify on alarm and recovery. These topics are NOT created by this module | `list(string)` | `[]` | no |
 | <a name="input_cloudwatch_logs_kms_key_id"></a> [cloudwatch\_logs\_kms\_key\_id](#input\_cloudwatch\_logs\_kms\_key\_id) | KMS key ID for CloudWatch logs | `string` | `null` | no |
 | <a name="input_cloudwatch_logs_log_group_class"></a> [cloudwatch\_logs\_log\_group\_class](#input\_cloudwatch\_logs\_log\_group\_class) | The class of the CloudWatch log group | `string` | `"STANDARD"` | no |
 | <a name="input_cloudwatch_logs_retention_in_days"></a> [cloudwatch\_logs\_retention\_in\_days](#input\_cloudwatch\_logs\_retention\_in\_days) | The number of days to retain the CloudWatch logs | `number` | `30` | no |
@@ -529,10 +641,12 @@ See [LICENSE](./LICENSE).
 | <a name="input_enable_account_triggers"></a> [enable\_account\_triggers](#input\_enable\_account\_triggers) | Enable EventBridge rules to trigger Lambda when AWS Organizations account creation events are detected (Only available in the us-east-1 region) | `bool` | `false` | no |
 | <a name="input_enable_config_triggers"></a> [enable\_config\_triggers](#input\_enable\_config\_triggers) | Enable EventBridge Pipes to trigger Lambda when config table is updated | `bool` | `true` | no |
 | <a name="input_enable_dry_run"></a> [enable\_dry\_run](#input\_enable\_dry\_run) | When true, triggers run the Lambda in dry-run (noop) mode | `bool` | `false` | no |
+| <a name="input_enable_observability"></a> [enable\_observability](#input\_enable\_observability) | Enable CloudWatch alarms and log metric filters covering the Lambda, Step Function, triggers and DynamoDB tables | `bool` | `false` | no |
 | <a name="input_events_sns_topic_arn"></a> [events\_sns\_topic\_arn](#input\_events\_sns\_topic\_arn) | Optional ARN of an existing SNS topic to publish assignment creation/deletion events from the Lambda (if null, event publishing disabled). This topic is NOT created by this module. | `string` | `null` | no |
 | <a name="input_lambda_memory"></a> [lambda\_memory](#input\_lambda\_memory) | Lambda function memory allocation in MB | `number` | `512` | no |
 | <a name="input_lambda_runtime"></a> [lambda\_runtime](#input\_lambda\_runtime) | Lambda function runtime | `string` | `"python3.14"` | no |
 | <a name="input_lambda_timeout"></a> [lambda\_timeout](#input\_lambda\_timeout) | Lambda function timeout in seconds | `number` | `300` | no |
+| <a name="input_log_level"></a> [log\_level](#input\_log\_level) | Log level for the Lambda function. Callers can still override this per invocation via the event's logging\_level field | `string` | `"INFO"` | no |
 | <a name="input_name"></a> [name](#input\_name) | Name for all resources i.e. handler, lambda, step function, event bridge, etc. | `string` | `"lz-sso"` | no |
 | <a name="input_sns_topic_arn"></a> [sns\_topic\_arn](#input\_sns\_topic\_arn) | ARN of SNS topic for Step Function notifications (if null, notifications disabled) | `string` | `null` | no |
 | <a name="input_step_function_schedule"></a> [step\_function\_schedule](#input\_step\_function\_schedule) | EventBridge cron/rate schedule for Lambda execution | `string` | `"rate(180 minutes)"` | no |
@@ -542,11 +656,14 @@ See [LICENSE](./LICENSE).
 
 | Name | Description |
 |------|-------------|
+| <a name="output_cloudwatch_alarm_arns"></a> [cloudwatch\_alarm\_arns](#output\_cloudwatch\_alarm\_arns) | Map of alarm name to ARN for the CloudWatch alarms provisioned when enable\_observability is true, empty otherwise |
 | <a name="output_config_dynamodb_table_arn"></a> [config\_dynamodb\_table\_arn](#output\_config\_dynamodb\_table\_arn) | ARN of the DynamoDB table storing group configurations |
 | <a name="output_config_dynamodb_table_name"></a> [config\_dynamodb\_table\_name](#output\_config\_dynamodb\_table\_name) | Name of the DynamoDB table storing group configurations |
 | <a name="output_eventbridge_invoke_role_arn"></a> [eventbridge\_invoke\_role\_arn](#output\_eventbridge\_invoke\_role\_arn) | ARN of EventBridge roles for account creation and cron schedule |
 | <a name="output_eventbridge_rule_arns"></a> [eventbridge\_rule\_arns](#output\_eventbridge\_rule\_arns) | ARNs of EventBridge rules for account creation and cron schedule |
 | <a name="output_eventbridge_rule_names"></a> [eventbridge\_rule\_names](#output\_eventbridge\_rule\_names) | Names of EventBridge rules for account creation and cron schedule |
+| <a name="output_lambda_cloudwatch_log_group_arn"></a> [lambda\_cloudwatch\_log\_group\_arn](#output\_lambda\_cloudwatch\_log\_group\_arn) | ARN of the CloudWatch log group receiving the Lambda function logs |
+| <a name="output_lambda_cloudwatch_log_group_name"></a> [lambda\_cloudwatch\_log\_group\_name](#output\_lambda\_cloudwatch\_log\_group\_name) | Name of the CloudWatch log group receiving the Lambda function logs |
 | <a name="output_lambda_function_arn"></a> [lambda\_function\_arn](#output\_lambda\_function\_arn) | ARN of the Lambda function for SSO group assignment |
 | <a name="output_lambda_function_name"></a> [lambda\_function\_name](#output\_lambda\_function\_name) | Name of the Lambda function for SSO group assignment |
 | <a name="output_lambda_policy_json"></a> [lambda\_policy\_json](#output\_lambda\_policy\_json) | IAM policy document (JSON) attached to the Lambda role via policy\_json |

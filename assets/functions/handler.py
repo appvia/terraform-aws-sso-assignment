@@ -793,8 +793,9 @@ def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         source = event.get("source", "unknown")
         # Get the AWS region
         aws_region = event.get("aws_region", os.environ.get("AWS_REGION", "eu-west-2"))
-        # Get the logging level
-        logging_level = event.get("logging_level", "INFO")
+        # Get the logging level, falling back to the environment before the default so
+        # the LOG_LEVEL environment variable is honoured when the event does not set one
+        logging_level = event.get("logging_level", os.environ.get("LOG_LEVEL", "INFO"))
         # Set the logging level
         logger.setLevel(logging_level.upper())
         # Ensure we have a valid environment

@@ -108,6 +108,8 @@ module "lambda" {
     DYNAMODB_CONFIG_TABLE = aws_dynamodb_table.config.name
     # Name of the DynamoDB table tracking managed SSO assignments
     DYNAMODB_TRACKING_TABLE = aws_dynamodb_table.assignments_tracking.name
+    # Default log level, overridable per invocation via the event's logging_level field
+    LOG_LEVEL = var.log_level
     # ARN of the Identity Center instance
     SSO_INSTANCE_ARN = var.sso_instance_arn
   }

@@ -42,6 +42,14 @@ mock_provider "aws" {
   }
 
   override_resource {
+    target = module.lambda.aws_cloudwatch_log_group.lambda[0]
+    values = {
+      arn  = "arn:aws:logs:eu-west-2:123456789012:log-group:/aws/lambda/lz-sso"
+      name = "/aws/lambda/lz-sso"
+    }
+  }
+
+  override_resource {
     target = aws_sfn_state_machine.main
     values = {
       arn = "arn:aws:states:eu-west-2:123456789012:stateMachine:lz-sso"
@@ -221,6 +229,197 @@ run "step_function_policy_includes_sns_publish_when_topic_provided" {
   assert {
     condition     = strcontains(aws_iam_role_policy.step_function_lambda.policy, "arn:aws:sns:eu-west-2:123456789012:topic")
     error_message = "Expected Step Function role policy to include the provided sns_topic_arn when set."
+  }
+}
+
+run "observability_disabled_creates_no_alarms" {
+  command = plan
+
+  variables {
+    enable_observability = false
+    sso_instance_arn     = "arn:aws:sso:::instance/ssoins-1234567890abcdef"
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_log_metric_filter.handler_errors) == 0 && length(aws_cloudwatch_log_metric_filter.identity_resolution_failures) == 0
+    error_message = "Expected no log metric filters when enable_observability=false."
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_metric_alarm.lambda_errors) == 0 && length(aws_cloudwatch_metric_alarm.step_function_executions_failed) == 0
+    error_message = "Expected no Lambda or Step Function alarms when enable_observability=false."
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_metric_alarm.eventbridge_failed_invocations) == 0 && length(aws_cloudwatch_metric_alarm.dynamodb_throttled_requests) == 0
+    error_message = "Expected no EventBridge or DynamoDB alarms when enable_observability=false."
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_metric_alarm.pipes_execution_failed) == 0
+    error_message = "Expected no Pipes alarm when enable_observability=false, even with config triggers enabled."
+  }
+}
+
+run "observability_enabled_creates_alarms_and_metric_filters" {
+  command = plan
+
+  variables {
+    enable_account_triggers = false
+    enable_config_triggers  = true
+    enable_observability    = true
+    sso_instance_arn        = "arn:aws:sso:::instance/ssoins-1234567890abcdef"
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_log_metric_filter.handler_errors) == 1 && length(aws_cloudwatch_log_metric_filter.identity_resolution_failures) == 1
+    error_message = "Expected both log metric filters when enable_observability=true."
+  }
+
+  assert {
+    condition     = aws_cloudwatch_log_metric_filter.handler_errors[0].metric_transformation[0].default_value == "0"
+    error_message = "Expected the handler errors metric filter to report a zero default so the alarm has continuous data."
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_metric_alarm.lambda_errors) == 1 && length(aws_cloudwatch_metric_alarm.lambda_throttles) == 1 && length(aws_cloudwatch_metric_alarm.lambda_duration) == 1
+    error_message = "Expected the three Lambda alarms when enable_observability=true."
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_metric_alarm.step_function_executions_failed) == 1 && length(aws_cloudwatch_metric_alarm.step_function_executions_timed_out) == 1 && length(aws_cloudwatch_metric_alarm.step_function_no_executions) == 1
+    error_message = "Expected the three Step Function alarms when enable_observability=true."
+  }
+
+  assert {
+    condition     = aws_cloudwatch_metric_alarm.step_function_no_executions[0].treat_missing_data == "breaching"
+    error_message = "Expected the liveness alarm to treat missing data as breaching, otherwise a stopped schedule never alarms."
+  }
+
+  assert {
+    condition     = aws_cloudwatch_metric_alarm.step_function_no_executions[0].comparison_operator == "LessThanThreshold"
+    error_message = "Expected the liveness alarm to fire when executions drop below the threshold."
+  }
+
+  assert {
+    condition     = aws_cloudwatch_metric_alarm.lambda_duration[0].threshold == 240000
+    error_message = "Expected the duration alarm threshold to be 80% of the default 300s timeout, expressed in milliseconds."
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_metric_alarm.dynamodb_throttled_requests) == 2
+    error_message = "Expected a DynamoDB throttling alarm for each of the config and tracking tables."
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_metric_alarm.eventbridge_failed_invocations) == 1
+    error_message = "Expected a single EventBridge alarm for the cron schedule rule when account triggers are disabled."
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_metric_alarm.pipes_execution_failed) == 1
+    error_message = "Expected the Pipes alarm when both observability and config triggers are enabled."
+  }
+}
+
+run "observability_enabled_without_config_triggers_skips_pipes_alarm" {
+  command = plan
+
+  variables {
+    enable_config_triggers = false
+    enable_observability   = true
+    sso_instance_arn       = "arn:aws:sso:::instance/ssoins-1234567890abcdef"
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_metric_alarm.pipes_execution_failed) == 0
+    error_message = "Expected no Pipes alarm when enable_config_triggers=false."
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_metric_alarm.lambda_errors) == 1
+    error_message = "Expected the remaining alarms to still be created when only config triggers are disabled."
+  }
+}
+
+run "observability_enabled_with_account_triggers_alarms_both_rules" {
+  command = plan
+
+  variables {
+    enable_account_triggers = true
+    enable_observability    = true
+    sso_instance_arn        = "arn:aws:sso:::instance/ssoins-1234567890abcdef"
+  }
+
+  assert {
+    condition     = length(aws_cloudwatch_metric_alarm.eventbridge_failed_invocations) == 2
+    error_message = "Expected an EventBridge alarm for both the cron schedule and account creation rules."
+  }
+}
+
+run "observability_alarm_arns_output_is_populated" {
+  command = apply
+
+  variables {
+    enable_account_triggers = true
+    enable_config_triggers  = true
+    enable_observability    = true
+    sso_instance_arn        = "arn:aws:sso:::instance/ssoins-1234567890abcdef"
+  }
+
+  # 9 count-based alarms, plus one per EventBridge rule (2) and DynamoDB table (2)
+  assert {
+    condition     = length(keys(output.cloudwatch_alarm_arns)) == 13
+    error_message = "Expected cloudwatch_alarm_arns to contain an entry for every provisioned alarm."
+  }
+
+  assert {
+    condition     = contains(keys(output.cloudwatch_alarm_arns), "step_function_no_executions")
+    error_message = "Expected cloudwatch_alarm_arns to include the liveness alarm."
+  }
+
+  assert {
+    condition     = contains(keys(output.cloudwatch_alarm_arns), "eventbridge_account_creation_failed_invocations") && contains(keys(output.cloudwatch_alarm_arns), "eventbridge_cron_schedule_failed_invocations")
+    error_message = "Expected cloudwatch_alarm_arns to key EventBridge alarms by rule."
+  }
+
+  assert {
+    condition     = contains(keys(output.cloudwatch_alarm_arns), "dynamodb_config_throttled_requests") && contains(keys(output.cloudwatch_alarm_arns), "dynamodb_tracking_throttled_requests")
+    error_message = "Expected cloudwatch_alarm_arns to key DynamoDB alarms by table."
+  }
+}
+
+run "observability_alarm_arns_output_is_empty_when_disabled" {
+  command = apply
+
+  variables {
+    enable_observability = false
+    sso_instance_arn     = "arn:aws:sso:::instance/ssoins-1234567890abcdef"
+  }
+
+  assert {
+    condition     = length(keys(output.cloudwatch_alarm_arns)) == 0
+    error_message = "Expected cloudwatch_alarm_arns to be empty when enable_observability=false."
+  }
+}
+
+run "observability_alarm_actions_use_provided_topics" {
+  command = plan
+
+  variables {
+    alarm_sns_topic_arns = ["arn:aws:sns:eu-west-2:123456789012:sso-alarms"]
+    enable_observability = true
+    sso_instance_arn     = "arn:aws:sso:::instance/ssoins-1234567890abcdef"
+  }
+
+  assert {
+    condition     = contains(aws_cloudwatch_metric_alarm.lambda_errors[0].alarm_actions, "arn:aws:sns:eu-west-2:123456789012:sso-alarms")
+    error_message = "Expected alarm_actions to contain the provided SNS topic ARN."
+  }
+
+  assert {
+    condition     = contains(aws_cloudwatch_metric_alarm.lambda_errors[0].ok_actions, "arn:aws:sns:eu-west-2:123456789012:sso-alarms")
+    error_message = "Expected ok_actions to contain the provided SNS topic ARN so alarms notify on recovery."
   }
 }
 

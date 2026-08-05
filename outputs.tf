@@ -1,3 +1,20 @@
+output "cloudwatch_alarm_arns" {
+  description = "Map of alarm name to ARN for the CloudWatch alarms provisioned when enable_observability is true, empty otherwise"
+  value = merge(
+    { for v in aws_cloudwatch_metric_alarm.handler_errors : "handler_errors" => v.arn },
+    { for v in aws_cloudwatch_metric_alarm.identity_resolution_failures : "identity_resolution_failures" => v.arn },
+    { for v in aws_cloudwatch_metric_alarm.step_function_executions_failed : "step_function_executions_failed" => v.arn },
+    { for v in aws_cloudwatch_metric_alarm.step_function_executions_timed_out : "step_function_executions_timed_out" => v.arn },
+    { for v in aws_cloudwatch_metric_alarm.step_function_no_executions : "step_function_no_executions" => v.arn },
+    { for v in aws_cloudwatch_metric_alarm.lambda_errors : "lambda_errors" => v.arn },
+    { for v in aws_cloudwatch_metric_alarm.lambda_throttles : "lambda_throttles" => v.arn },
+    { for v in aws_cloudwatch_metric_alarm.lambda_duration : "lambda_duration" => v.arn },
+    { for v in aws_cloudwatch_metric_alarm.pipes_execution_failed : "pipes_execution_failed" => v.arn },
+    { for k, v in aws_cloudwatch_metric_alarm.eventbridge_failed_invocations : "eventbridge_${k}_failed_invocations" => v.arn },
+    { for k, v in aws_cloudwatch_metric_alarm.dynamodb_throttled_requests : "dynamodb_${k}_throttled_requests" => v.arn },
+  )
+}
+
 output "config_dynamodb_table_arn" {
   description = "ARN of the DynamoDB table storing group configurations"
   value       = aws_dynamodb_table.config.arn
@@ -29,6 +46,16 @@ output "eventbridge_rule_names" {
     cron_schedule    = aws_cloudwatch_event_rule.cron_schedule.name
     config_update    = try(aws_pipes_pipe.config_update[0].name, null)
   }
+}
+
+output "lambda_cloudwatch_log_group_arn" {
+  description = "ARN of the CloudWatch log group receiving the Lambda function logs"
+  value       = module.lambda.lambda_cloudwatch_log_group_arn
+}
+
+output "lambda_cloudwatch_log_group_name" {
+  description = "Name of the CloudWatch log group receiving the Lambda function logs"
+  value       = module.lambda.lambda_cloudwatch_log_group_name
 }
 
 output "lambda_function_arn" {
