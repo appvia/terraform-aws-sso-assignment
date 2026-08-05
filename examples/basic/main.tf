@@ -142,6 +142,11 @@ locals {
   # Example: "arn:aws:sns:us-east-1:123456789012:my-notifications"
   # Leave null to disable notifications
   sns_topic_arn = null
+
+  # Optional: SNS topics notified when a CloudWatch alarm fires or recovers
+  # Example: ["arn:aws:sns:us-east-1:123456789012:my-alarms"]
+  # Leave empty to create the alarms without wiring up notifications
+  alarm_sns_topic_arns = []
 }
 
 ## Provision the SSO assignment module
@@ -156,6 +161,10 @@ module "sso_assignment" {
   dynamodb_encryption_enabled = true
   # Enable EventBridge Pipes to trigger Lambda when config table is updated (defaults to true)
   enable_config_triggers = true
+  # Enable CloudWatch alarms and log metric filters (defaults to false)
+  enable_observability = true
+  # Optional: SNS topics notified when an alarm fires or recovers (empty = alarms are created but do not notify)
+  alarm_sns_topic_arns = local.alarm_sns_topic_arns
   # Optional: Set to SNS topic ARN to receive notifications (null = disabled)
   sns_topic_arn = local.sns_topic_arn
   # ARN of the Identity Center instance

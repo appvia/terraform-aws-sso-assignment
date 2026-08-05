@@ -6,6 +6,7 @@ Tests for `assets/functions/libs/*` live under `assets/functions/libs/tests/`.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from unittest.mock import MagicMock, patch
@@ -1331,6 +1332,55 @@ class TestHasMatchingBinding:
             handler.has_matching_binding(assignment=assignment, bindings=bindings)
             is False
         )
+
+
+class TestLoggingLevelResolution:
+    """
+    The handler sets the log level before validating the environment, so an invocation
+    with a deliberately incomplete environment exercises the resolution and returns
+    early without touching AWS.
+    """
+
+    @pytest.fixture(autouse=True)
+    def restore_logger_level(self):
+        before = handler.logger.level
+        yield
+        handler.logger.setLevel(before)
+
+    def test_given_log_level_env_var_when_event_omits_logging_level_then_env_var_is_used(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+        monkeypatch.delenv("DYNAMODB_CONFIG_TABLE", raising=False)
+
+        result = handler.lambda_handler({"source": "cron_schedule"}, None)
+
+        assert result["status"] == "error"
+        assert handler.logger.level == logging.DEBUG
+
+    def test_given_event_logging_level_when_log_level_env_var_also_set_then_event_wins(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+        monkeypatch.delenv("DYNAMODB_CONFIG_TABLE", raising=False)
+
+        result = handler.lambda_handler(
+            {"source": "cron_schedule", "logging_level": "WARNING"}, None
+        )
+
+        assert result["status"] == "error"
+        assert handler.logger.level == logging.WARNING
+
+    def test_given_no_log_level_env_var_when_event_omits_logging_level_then_defaults_to_info(
+        self, monkeypatch
+    ):
+        monkeypatch.delenv("LOG_LEVEL", raising=False)
+        monkeypatch.delenv("DYNAMODB_CONFIG_TABLE", raising=False)
+
+        result = handler.lambda_handler({"source": "cron_schedule"}, None)
+
+        assert result["status"] == "error"
+        assert handler.logger.level == logging.INFO
 
 
 class TestValidateEnvironmentBDD:

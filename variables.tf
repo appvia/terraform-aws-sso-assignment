@@ -1,3 +1,58 @@
+variable "alarm_duration_threshold_percent" {
+  description = "Percentage of lambda_timeout at which the Lambda duration alarm triggers"
+  type        = number
+  default     = 80
+
+  validation {
+    condition     = var.alarm_duration_threshold_percent > 0 && var.alarm_duration_threshold_percent <= 100
+    error_message = "alarm_duration_threshold_percent must be between 1 and 100."
+  }
+}
+
+variable "alarm_execution_staleness_period_seconds" {
+  description = "Period in seconds over which an absence of Step Function executions raises the liveness alarm. Must be comfortably longer than step_function_schedule"
+  type        = number
+  default     = 21600
+
+  validation {
+    condition     = var.alarm_execution_staleness_period_seconds >= 60 && var.alarm_execution_staleness_period_seconds <= 86400
+    error_message = "alarm_execution_staleness_period_seconds must be between 60 and 86400 seconds."
+  }
+
+  validation {
+    condition     = var.alarm_execution_staleness_period_seconds % 60 == 0
+    error_message = "alarm_execution_staleness_period_seconds must be a multiple of 60."
+  }
+}
+
+variable "alarm_identity_resolution_threshold" {
+  description = "Number of identity resolution warnings (groups, users or permission sets missing from Identity Center) tolerated before alarming"
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.alarm_identity_resolution_threshold >= 0
+    error_message = "alarm_identity_resolution_threshold must be zero or greater."
+  }
+}
+
+variable "alarm_metric_namespace" {
+  description = "CloudWatch namespace for the custom metrics extracted from the Lambda logs"
+  type        = string
+  default     = "Appvia/SSOAssignment"
+
+  validation {
+    condition     = length(var.alarm_metric_namespace) > 0
+    error_message = "alarm_metric_namespace must be a non-empty string."
+  }
+}
+
+variable "alarm_sns_topic_arns" {
+  description = "ARNs of existing SNS topics to notify on alarm and recovery. These topics are NOT created by this module"
+  type        = list(string)
+  default     = []
+}
+
 variable "cloudwatch_logs_kms_key_id" {
   description = "KMS key ID for CloudWatch logs"
   type        = string
@@ -84,6 +139,12 @@ variable "enable_dry_run" {
   default     = false
 }
 
+variable "enable_observability" {
+  description = "Enable CloudWatch alarms and log metric filters covering the Lambda, Step Function, triggers and DynamoDB tables"
+  type        = bool
+  default     = false
+}
+
 variable "lambda_memory" {
   description = "Lambda function memory allocation in MB"
   type        = number
@@ -114,6 +175,17 @@ variable "lambda_timeout" {
   validation {
     condition     = var.lambda_timeout >= 3 && var.lambda_timeout <= 900
     error_message = "lambda_timeout must be between 3 and 900 seconds."
+  }
+}
+
+variable "log_level" {
+  description = "Log level for the Lambda function. Callers can still override this per invocation via the event's logging_level field"
+  type        = string
+  default     = "INFO"
+
+  validation {
+    condition     = contains(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], var.log_level)
+    error_message = "log_level must be one of DEBUG, INFO, WARNING, ERROR or CRITICAL."
   }
 }
 
