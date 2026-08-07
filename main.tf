@@ -79,15 +79,16 @@ module "lambda" {
   source  = "terraform-aws-modules/lambda/aws"
   version = "8.8.0"
 
-  architectures = ["arm64"]
-  function_name = var.name
-  memory_size   = var.lambda_memory
-  function_tags = var.tags
-  description   = "Used to automate SSO assignments based on templates and account tagging"
-  handler       = "handler.lambda_handler"
-  runtime       = var.lambda_runtime
-  timeout       = var.lambda_timeout
-  tags          = var.tags
+  architectures                = ["arm64"]
+  description                  = "Used to automate SSO assignments based on templates and account tagging"
+  function_name                = var.name
+  function_tags                = var.tags
+  handler                      = "handler.lambda_handler"
+  memory_size                  = var.lambda_memory
+  runtime                      = var.lambda_runtime
+  tags                         = var.tags
+  timeout                      = var.lambda_timeout
+  trigger_on_package_timestamp = var.trigger_on_package_timestamp
 
   source_path = [
     {

@@ -64,6 +64,12 @@ variable "cloudwatch_logs_kms_key_id" {
   }
 }
 
+variable "trigger_on_package_timestamp" {
+  description = "When true, the Lambda is triggered to redeploy when the package timestamp changes (useful for CI/CD pipelines)"
+  type        = bool
+  default     = false
+}
+
 variable "cloudwatch_logs_log_group_class" {
   description = "The class of the CloudWatch log group"
   type        = string
