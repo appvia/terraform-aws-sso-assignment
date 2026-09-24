@@ -77,7 +77,7 @@ resource "aws_dynamodb_table" "assignments_tracking" {
 ## Lambda function for SSO group assignment using terraform-aws-modules/lambda/aws
 module "lambda" {
   source  = "terraform-aws-modules/lambda/aws"
-  version = "8.8.0"
+  version = "8.9.0"
 
   architectures                = ["arm64"]
   description                  = "Used to automate SSO assignments based on templates and account tagging"
